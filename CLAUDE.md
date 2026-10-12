@@ -18,6 +18,8 @@ api/                 # aiohttp route handlers (thin: parse request, call service
 services/            # Pure-ish logic: path resolution, validation, file ops. No aiohttp imports.
 web/                 # Frontend JS served by ComfyUI (WEB_DIRECTORY = "./web")
 tests/               # pytest; runnable without a ComfyUI install (see Testing)
+scripts/              # dev.sh (local ComfyUI), later model_crud_upload.py (reference CLI client)
+docs/                 # comfyui-notes.md (verified ComfyUI internals), later benchmarks, security review
 ```
 
 ## ComfyUI integration rules
@@ -27,7 +29,9 @@ tests/               # pytest; runnable without a ComfyUI install (see Testing)
 - **Namespace all routes** under `/model_crud/` to avoid colliding with core or other extensions (e.g. `GET /model_crud/folders`, `GET /model_crud/models/{folder}`, `POST /model_crud/uploads`, `DELETE /model_crud/models/{folder}?path=...`). [SPEC.md](SPEC.md) is the source of truth for endpoints, error codes and requirements; keep it and the README in sync with the code.
 - **Model directories come from ComfyUI, never from hardcoded paths.** Use `folder_paths` (`folder_names_and_paths`, `get_folder_paths(name)`, `models_dir`, `supported_pt_extensions`). This is what makes `extra_model_paths.yaml` and custom model locations work. Do not assume `ComfyUI/models/...`.
 - A model "folder" in the API is a **ComfyUI folder key** (`checkpoints`, `loras`, `vae`, ...), not a filesystem path. Clients send the key; the server resolves it.
-- After an upload or delete, invalidate ComfyUI's cached listing so node dropdowns update: `folder_paths.filename_list_cache.pop(folder_key, None)` (verify the attribute exists in the targeted ComfyUI version before relying on it).
+- After an upload or delete, invalidate ComfyUI's cached listing so node dropdowns update: `folder_paths.filename_list_cache.pop(folder_key, None)` (verified to exist; the key is the canonical folder key, which is why legacy aliases like `unet` are rejected). See [docs/comfyui-notes.md](docs/comfyui-notes.md) for everything verified against ComfyUI's source.
+- Only expose folder keys whose ComfyUI extension set intersects our allowlist (FR-L1); `folder_names_and_paths` also contains `custom_nodes`, `datasets`, `configs`, ...
+- The listen address for SR-10 is `comfy.cli_args.args.listen` (guarded import), not `PromptServer.address`, which is unset while custom nodes load.
 - Import only what ComfyUI guarantees at runtime (`server`, `folder_paths`, `aiohttp`, stdlib). Do not add runtime Python dependencies unless unavoidable; if you do, list them in `requirements.txt` (ComfyUI Manager installs from it) and justify it in the PR.
 - Never block the event loop: file hashing, large copies, `os.walk` over big trees, and deletes of large files go through `asyncio.to_thread` / `run_in_executor`. Uploads follow the chunked/resumable protocol in SPEC.md §5.2/§6.4 (target of 50 GB files): one preallocated temp file, chunks written at their offset, no assembly step, `fsync` + atomic rename on completion. Read chunk bodies from `request.content` in ≤ 1 MiB blocks and write them in a dedicated thread pool; never use `request.read()`, `request.post()` or `request.multipart()` for uploads (they buffer, and are bounded by aiohttp's `client_max_size`).
 
@@ -55,10 +59,10 @@ This extension writes and deletes files on the host. ComfyUI has no built-in aut
 
 ## Frontend conventions
 
-- Plain ES modules in `web/`, no build step unless it becomes unavoidable (ComfyUI serves `WEB_DIRECTORY` files as-is, and only `.js` files are loaded automatically). If a bundler is introduced, commit the built output or document the build clearly, since users install by `git clone`.
+- Plain ES modules in `web/`, no build step unless it becomes unavoidable (ComfyUI serves `WEB_DIRECTORY` files as-is, and **every** `.js` file under it, recursively, is loaded as an extension, so helper modules must have no import-time side effects and tests must live outside `web/`). If a bundler is introduced, commit the built output or document the build clearly, since users install by `git clone`.
 - Register via `app.registerExtension({ name: "ModelCrud.<Feature>", ... })` using `import { app } from "../../scripts/app.js"` and `import { api } from "../../scripts/api.js"`. The `../../scripts/` imports are relative to `/extensions/<folder-name>/`, so do not rename or relocate files in `web/` casually.
 - Prefer the frontend's official extension APIs (sidebar tab via `app.extensionManager.registerSidebarTab`, settings via the `settings` field, toasts via `app.extensionManager.toast`) over patching DOM or core prototypes. Don't monkey-patch ComfyUI internals.
-- Use `api.fetchApi` for all requests. For uploads, use the chunk scheduler in `web/uploader.js`: `Blob.slice` (never load the whole file), parallel chunk `XMLHttpRequest`s for byte progress, retry with backoff, resume from the server's `received_ranges`; surface server `message` text on failure.
+- Use `api.fetchApi` for all requests (default timeout is 60 s: pass `{ timeoutMs: null }` for long calls such as `/complete` with a hash; use `api.apiURL(path)` to build XHR URLs). For uploads, use the chunk scheduler in `web/uploader.js`: `Blob.slice` (never load the whole file), parallel chunk `XMLHttpRequest`s for byte progress, retry with backoff, resume from the server's `received_ranges`; surface server `message` text on failure.
 - **Always confirm before delete** in the UI, showing the filename and folder.
 - Escape/`textContent` everything that comes from the server (filenames are untrusted input). Never use `innerHTML` with them.
 - Style with ComfyUI's CSS variables (`--comfy-menu-bg`, `--fg-color`, ...) so it follows light/dark themes. Namespace all CSS classes with `model-crud-`.

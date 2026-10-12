@@ -60,7 +60,6 @@ class FakeFolderPaths(types.ModuleType):
 class FakePromptServer:
     def __init__(self) -> None:
         self.routes = web.RouteTableDef()
-        self.address = "127.0.0.1"
 
 
 @pytest.fixture

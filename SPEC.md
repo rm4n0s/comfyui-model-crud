@@ -39,14 +39,14 @@ It runs inside the ComfyUI process (aiohttp server) and adds no workflow nodes.
 
 ## 4. Terminology
 
-- **Folder key**: ComfyUI's name for a model category (`checkpoints`, `loras`, `vae`, `controlnet`, ...), as in `folder_paths.folder_names_and_paths`. Clients only ever send folder keys, never filesystem paths.
+- **Folder key**: ComfyUI's name for a model category (`checkpoints`, `loras`, `vae`, `controlnet`, ...), as in `folder_paths.folder_names_and_paths`. Clients only ever send folder keys, never filesystem paths. Only canonical keys (those present in `folder_names_and_paths`) are accepted; legacy aliases such as `unet` and `clip` are `unknown_folder`, so cache invalidation always hits the right key.
 - **Root**: one of the directories registered for a folder key (`folder_paths.get_folder_paths(key)`). A key can have several roots.
 - **Relative path**: a file's path under its root, `/`-separated, e.g. `sdxl/my_lora.safetensors`.
 
 ## 5. Functional requirements
 
 ### 5.1 List
-- **FR-L1** List all folder keys that have at least one existing root.
+- **FR-L1** List the folder keys that have at least one existing root and whose ComfyUI extension set shares at least one entry with the allowlist (§8.2). This excludes non-model keys such as `custom_nodes`, `datasets`, `configs` and `diffusers`.
 - **FR-L2** List the model files under a folder key, across all its roots, recursively.
 - **FR-L3** Only files with an allowed extension (§8.2) are returned. Other files are ignored.
 - **FR-L4** Each entry has: relative `path`, `name`, `size` (bytes), `modified` (ISO-8601 UTC), and `root_index` (index of the root it lives in, so that duplicate relative paths in different roots are distinguishable).
@@ -193,7 +193,7 @@ Errors: `400 bad_chunk` (index out of range, wrong length), `404 unknown_upload`
 `200`: `{ "uploads": [ <same fields as 6.4.3 without received_ranges> ] }`. Used by the UI to offer resumption.
 
 #### 6.4.5 `POST /model_crud/uploads/{upload_id}/complete` — publish
-Optional JSON body: `{ "sha256": "<hex of the whole file>" }`. If given, the server hashes the assembled file in a worker thread (a full read; roughly a minute for 50 GB on NVMe) and rejects on mismatch.
+Optional JSON body: `{ "sha256": "<hex of the whole file>" }`. If given, the server hashes the assembled file in a worker thread (a full read; roughly a minute for 50 GB on NVMe) and rejects on mismatch. This request can outlast `api.fetchApi`'s default 60 s timeout, so browser clients pass `timeoutMs: null`.
 
 `201`: `{ "folder": "checkpoints", "path": "sdxl/big.safetensors", "size": 53687091200 }`
 Errors: `404 unknown_upload`, `409 incomplete_upload` (body lists `missing_ranges`), `409 file_exists`, `422 checksum_mismatch` (temp file kept so the client can investigate or cancel).
@@ -248,7 +248,7 @@ ComfyUI has no authentication and is commonly exposed with `--listen`. This exte
 
 ### 8.4 Exposure
 - **SR-9** No CORS wildcard; ComfyUI's origin checks are left intact.
-- **SR-10** On startup, log one warning if ComfyUI is listening on a non-loopback address while writes are enabled, naming `MODEL_CRUD_READ_ONLY=1`.
+- **SR-10** On startup, log one warning if ComfyUI is listening on a non-loopback address while writes are enabled, naming `MODEL_CRUD_READ_ONLY=1`. The address comes from `comfy.cli_args.args.listen` (imported defensively; `PromptServer.address` is not set yet when custom nodes load). Log a second warning if `--enable-cors-header` is set, because it replaces ComfyUI's origin check.
 - **SR-11** The UI renders server-provided strings with `textContent` only.
 
 ## 9. Non-functional requirements
