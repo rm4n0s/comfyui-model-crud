@@ -6,6 +6,7 @@ waits on a directory walk.
 
 import asyncio
 import functools
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -13,9 +14,9 @@ from typing import Any
 
 from aiohttp import web
 
-from ..services import models
+from ..services import models, uploads
 from ..services.config import Config, get_config
-from ..services.errors import BadRequest, ModelCrudError
+from ..services.errors import BadChunk, BadRequest, ModelCrudError, TooLarge
 from ..services.version import VERSION
 
 log = logging.getLogger("comfyui-model-crud")
@@ -71,6 +72,55 @@ def root_index_param(request: web.Request) -> int | None:
     return int(raw)
 
 
+MAX_JSON_BYTES = 64 * 1024  # control requests are tiny; never buffer an unbounded body
+
+
+async def read_json_object(request: web.Request) -> dict[str, Any]:
+    """Read a small JSON object body without ``request.read()``/``json()``, with a hard cap."""
+    if request.content_length is not None and request.content_length > MAX_JSON_BYTES:
+        raise TooLarge("Request body is too large.")
+    received = bytearray()
+    async for block in request.content.iter_chunked(8192):
+        received += block
+        if len(received) > MAX_JSON_BYTES:
+            raise TooLarge("Request body is too large.")
+    if not received:
+        return {}
+    try:
+        body = json.loads(received)
+    except (ValueError, RecursionError):
+        raise BadRequest("Request body must be valid JSON.") from None
+    if not isinstance(body, dict):
+        raise BadRequest("Request body must be a JSON object.")
+    return body
+
+
+def required_field(body: dict[str, Any], name: str) -> Any:
+    if name not in body:
+        raise BadRequest(f"'{name}' is required.")
+    return body[name]
+
+
+def chunk_index(raw: str) -> int:
+    if not re.fullmatch(r"[0-9]{1,9}", raw):
+        raise BadChunk("Chunk index must be a non-negative whole number.")
+    return int(raw)
+
+
+def describe_session(session: uploads.UploadSession) -> dict[str, Any]:
+    config = uploads.get_manager().config
+    return {
+        "upload_id": session.id,
+        "folder": session.folder,
+        "path": session.relpath,
+        "size": session.size,
+        "chunk_size": session.chunk_size,
+        "total_chunks": session.total_chunks,
+        "max_parallel": config.max_parallel,
+        "expires_at": uploads.iso_utc(session.expires_at),
+    }
+
+
 def describe_config(config: Config) -> dict[str, Any]:
     return {
         "version": VERSION,
@@ -116,3 +166,44 @@ def register_routes(routes: web.RouteTableDef) -> None:
             models.delete_model, folder, path, root_index, get_config()
         )
         return json_ok(result)
+
+    @routes.post("/model_crud/uploads")
+    @api_handler
+    async def create_upload(request: web.Request) -> web.StreamResponse:
+        body = await read_json_object(request)
+        session = await uploads.get_manager().create_session(
+            folder=required_field(body, "folder"),
+            filename=required_field(body, "filename"),
+            size=required_field(body, "size"),
+            subfolder=body.get("subfolder"),
+            overwrite=body.get("overwrite", False),
+            client_fingerprint=body.get("client_fingerprint"),
+        )
+        return json_ok(describe_session(session), status=201)
+
+    @routes.put("/model_crud/uploads/{upload_id}/chunks/{index}")
+    @api_handler
+    async def put_chunk(request: web.Request) -> web.StreamResponse:
+        # Streamed from request.content: request.read()/post()/multipart() would buffer the
+        # whole chunk and are capped by aiohttp's client_max_size (docs/comfyui-notes.md).
+        index = chunk_index(request.match_info["index"])
+        if "Upload-Chunk-SHA256" in request.headers:  # until verified, never pretend it was
+            raise BadRequest("Per-chunk checksums are not supported yet.")
+        result = await uploads.get_manager().write_chunk(
+            request.match_info["upload_id"], index, request.content, request.content_length
+        )
+        return json_ok(result)
+
+    @routes.post("/model_crud/uploads/{upload_id}/complete")
+    @api_handler
+    async def complete_upload(request: web.Request) -> web.StreamResponse:
+        body = await read_json_object(request)
+        result = await uploads.get_manager().complete(
+            request.match_info["upload_id"], body.get("sha256")
+        )
+        return json_ok(result, status=201)
+
+    @routes.delete("/model_crud/uploads/{upload_id}")
+    @api_handler
+    async def cancel_upload(request: web.Request) -> web.StreamResponse:
+        return json_ok(await uploads.get_manager().cancel(request.match_info["upload_id"]))

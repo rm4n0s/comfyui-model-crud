@@ -127,11 +127,14 @@ def cli_args(monkeypatch: pytest.MonkeyPatch) -> Namespace:
 
 
 @pytest.fixture
-def comfy_app() -> Callable[[web.RouteTableDef], web.Application]:
-    """Build an app wired like ComfyUI's ``add_routes()``: each route at ``/x`` and ``/api/x``."""
+def comfy_app() -> Callable[..., web.Application]:
+    """Build an app wired like ComfyUI's ``add_routes()``: each route at ``/x`` and ``/api/x``.
 
-    def build(routes: web.RouteTableDef) -> web.Application:
-        app = web.Application()
+    Extra keyword arguments go to ``web.Application`` (ComfyUI sets ``client_max_size``).
+    """
+
+    def build(routes: web.RouteTableDef, **app_kwargs) -> web.Application:
+        app = web.Application(**app_kwargs)
         api_routes = web.RouteTableDef()
         for route in routes:
             api_routes.route(route.method, "/api" + route.path)(route.handler, **route.kwargs)

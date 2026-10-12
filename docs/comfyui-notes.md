@@ -80,3 +80,10 @@ Verified against ComfyUI source, not from memory. Re-check when raising the mini
 - `/object_info/LoraLoader` (`input.required.lora_name[0]`) is what the frontend reads when a loader dropdown refreshes. A file dropped into `models/loras` appeared there, and after `DELETE /api/model_crud/models/loras?path=...` it was gone. `filename_list_cache` also revalidates by directory mtime, so this check does not by itself prove our `pop` was necessary; the pop is covered by unit tests.
 - ComfyUI's own dropdown lists model files that are symlinks pointing outside the models folder (`escape.safetensors` showed up). Our listing omits them and delete refuses them (SR-2), so such a file is visible in the dropdown but not manageable here.
 - The origin middleware applies to `DELETE` like any other method: a request with `Origin: http://evil.example` got 403 and the file survived.
+
+## Observed while building upload (Step 5, real server)
+
+- ComfyUI's own buffered endpoint refuses a 128 MiB body (`POST /upload/image` gives 413 with the default `--max-upload-size 100`), while our `PUT .../chunks/{i}` with `MODEL_CRUD_CHUNK_MB=128` accepted a 128 MiB body and the SHA-256 of the result matched. Server RSS stayed at about 725 MB before, during and after.
+- When a client drops mid-body, aiohttp 3.14 cancels the handler task (`CancelledError` at the next read). The upload code therefore must release session state in `finally` blocks, which it does (writer count, per-index lock, file handle); tested with a real aborted request.
+- Recent aiohttp versions send the request headers together with the first body bytes, so a test client that stalls before yielding anything never reaches the server.
+- `os.posix_fallocate` is available and preallocation of the temp file is immediate on this machine's ext4; the sparse-file fallback is only covered by unit tests (no real filesystem here lacks fallocate).

@@ -168,13 +168,13 @@ Request (JSON):
   "expires_at": "2026-10-13T12:00:00Z"
 }
 ```
-Errors: `400 bad_request`, `400 invalid_filename`, `400 path_outside_root`, `403 uploads_disabled`, `404 unknown_folder`, `409 file_exists`, `409 upload_in_progress`, `413 too_large`, `415 extension_not_allowed`, `429 too_many_uploads`, `507 insufficient_storage`.
+Errors: `400 bad_request`, `400 invalid_filename`, `400 path_outside_root`, `403 uploads_disabled`, `403 permission_denied`, `404 unknown_folder`, `409 file_exists` (also when a folder has that name), `409 upload_in_progress`, `413 too_large`, `415 extension_not_allowed`, `429 too_many_uploads`, `507 insufficient_storage`. JSON request bodies are limited to 64 KiB (`413 too_large`).
 
 #### 6.4.2 `PUT /model_crud/uploads/{upload_id}/chunks/{index}` — send one chunk
 Body: the raw bytes of chunk `index` (0-based). `Content-Length` is required and must equal `chunk_size` (or the remainder for the last chunk). Optional header `Upload-Chunk-SHA256: <hex>`.
 
 `200`: `{ "index": 17, "received_chunks": 18, "received_bytes": 1207959552 }`
-Errors: `400 bad_chunk` (index out of range, wrong length), `404 unknown_upload`, `422 checksum_mismatch` (chunk not recorded; re-send), `507 insufficient_storage`.
+Errors: `400 bad_chunk` (index out of range, wrong or missing `Content-Length`, body shorter or longer than declared, stalled for 120 s), `404 unknown_upload`, `409 upload_in_progress` (the session is being finalised), `422 checksum_mismatch` (chunk not recorded; re-send), `429 too_many_uploads` (more than `max_parallel` chunk requests in flight for this session; retry after a short backoff), `507 insufficient_storage`. Two requests for the same index are serialised, so the last complete body wins and blocks of different senders never mix.
 
 #### 6.4.3 `GET /model_crud/uploads/{upload_id}` — status / resume
 `200`:
@@ -197,10 +197,10 @@ Errors: `400 bad_chunk` (index out of range, wrong length), `404 unknown_upload`
 Optional JSON body: `{ "sha256": "<hex of the whole file>" }`. If given, the server hashes the assembled file in a worker thread (a full read; roughly a minute for 50 GB on NVMe) and rejects on mismatch. This request can outlast `api.fetchApi`'s default 60 s timeout, so browser clients pass `timeoutMs: null`.
 
 `201`: `{ "folder": "checkpoints", "path": "sdxl/big.safetensors", "size": 53687091200 }`
-Errors: `404 unknown_upload`, `409 incomplete_upload` (body lists `missing_ranges`), `409 file_exists`, `422 checksum_mismatch` (temp file kept so the client can investigate or cancel).
+Errors: `403 uploads_disabled`, `404 unknown_upload`, `409 incomplete_upload` (body lists `missing_ranges`), `409 upload_in_progress` (a chunk is still being received, or another `complete` is running), `409 file_exists` (the session stays open with its data: remove the conflict and call `complete` again, or cancel), `422 checksum_mismatch` (temp file kept so the client can investigate or cancel).
 
 #### 6.4.6 `DELETE /model_crud/uploads/{upload_id}` — cancel
-Removes the temp and sidecar files and the session. `200`: `{ "upload_id": "Zk3v…", "cancelled": true }`. Errors: `404 unknown_upload`.
+Removes the temp and sidecar files and the session. `200`: `{ "upload_id": "Zk3v…", "cancelled": true }`. Errors: `403 uploads_disabled`, `404 unknown_upload`, `409 upload_in_progress` (the session is being finalised).
 
 ### 6.5 `DELETE /model_crud/models/{folder}?path=<relative path>[&root_index=<n>]`
 `path` is a query parameter (not a URL segment) to avoid slash/encoding ambiguity in routing.

@@ -9,7 +9,10 @@ log = logging.getLogger("comfyui-model-crud")
 
 # NFR-5: a bug in this extension must never stop ComfyUI from starting. Importing api.register
 # registers the routes as a side effect; if that fails we log and stay inert.
-try:
-    from .api import register  # noqa: F401
-except Exception:
-    log.exception("comfyui-model-crud failed to load and is disabled")
+# `__package__` is empty when pytest imports this file as a plain module (the repo root is its
+# rootdir package); ComfyUI always loads it as a package.
+if __package__:
+    try:
+        from .api import register  # noqa: F401
+    except Exception:
+        log.exception("comfyui-model-crud failed to load and is disabled")
