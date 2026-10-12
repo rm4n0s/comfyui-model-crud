@@ -1,0 +1,1 @@
+# No runtime dependencies: the extension uses only ComfyUI's own environment (aiohttp, stdlib).

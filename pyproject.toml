@@ -1,0 +1,38 @@
+[project]
+name = "comfyui-model-crud"
+version = "0.1.0"
+description = "List, upload and delete model files from inside ComfyUI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-only" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "pytest-aiohttp",
+  "aiohttp",
+  "ruff",
+]
+
+[tool.comfy]
+PublisherId = "your-publisher-id"
+DisplayName = "Model CRUD"
+Icon = ""
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The repo root is itself a package (ComfyUI imports it as one), so let pytest import test
+# modules by file path instead of walking up to the root __init__.py.
+addopts = "--import-mode=importlib"
+asyncio_mode = "auto"
+markers = ["slow: opt-in scale tests (run with -m slow)"]
