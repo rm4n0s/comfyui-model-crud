@@ -58,6 +58,12 @@ class DeleteDisabled(ModelCrudError):
     default_message = "Deleting models is disabled on this server."
 
 
+class PermissionDenied(ModelCrudError):
+    status = 403
+    code = "permission_denied"
+    default_message = "The server is not allowed to change this file."
+
+
 class UnknownFolder(ModelCrudError):
     status = 404
     code = "unknown_folder"

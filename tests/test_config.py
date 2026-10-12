@@ -177,6 +177,7 @@ def test_error_catalogue_covers_spec_section_6():
         "bad_chunk": 400,
         "uploads_disabled": 403,
         "delete_disabled": 403,
+        "permission_denied": 403,
         "unknown_folder": 404,
         "file_not_found": 404,
         "unknown_upload": 404,

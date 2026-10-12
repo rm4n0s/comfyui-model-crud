@@ -74,3 +74,9 @@ Verified against ComfyUI source, not from memory. Re-check when raising the mini
 - ComfyUI refuses to start a second instance on the same database file ("Close the other ComfyUI ..."), so parallel test instances need `--database-url` or `--disable-assets`.
 - `extra_model_paths.yaml` entries are honoured (second `loras` root listed with `root_index: 1`).
 - `--listen 0.0.0.0` is visible through `comfy.cli_args.args.listen` at import time, and our SR-10 warning fires; `MODEL_CRUD_READ_ONLY=1` silences it.
+
+## Observed while building delete (Step 4, real server)
+
+- `/object_info/LoraLoader` (`input.required.lora_name[0]`) is what the frontend reads when a loader dropdown refreshes. A file dropped into `models/loras` appeared there, and after `DELETE /api/model_crud/models/loras?path=...` it was gone. `filename_list_cache` also revalidates by directory mtime, so this check does not by itself prove our `pop` was necessary; the pop is covered by unit tests.
+- ComfyUI's own dropdown lists model files that are symlinks pointing outside the models folder (`escape.safetensors` showed up). Our listing omits them and delete refuses them (SR-2), so such a file is visible in the dropdown but not manageable here.
+- The origin middleware applies to `DELETE` like any other method: a request with `Origin: http://evil.example` got 403 and the file survived.

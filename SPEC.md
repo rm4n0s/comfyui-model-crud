@@ -206,10 +206,12 @@ Removes the temp and sidecar files and the session. `200`: `{ "upload_id": "Zk3v
 `path` is a query parameter (not a URL segment) to avoid slash/encoding ambiguity in routing.
 
 `200`: `{ "folder": "loras", "path": "sdxl/detail.safetensors", "deleted": true }`
-Errors: `400 path_outside_root`, `403 delete_disabled`, `404 unknown_folder`, `404 file_not_found`, `415 extension_not_allowed`.
+Errors: `400 bad_request` (missing, repeated or malformed `path` / `root_index`), `400 path_outside_root`, `400 invalid_filename`, `403 delete_disabled`, `403 permission_denied` (the OS refused the unlink), `404 unknown_folder`, `404 file_not_found`, `415 extension_not_allowed`.
+
+The file is removed with `os.unlink` on the entry itself: for a symlink inside the root the link is removed and its target is left alone. Without `root_index` the first root that contains the path is used.
 
 ### 6.6 Status code summary
-`400` malformed input · `403` operation disabled by config · `404` unknown folder / file / upload · `409` exists, upload in progress, incomplete · `413` too large · `415` extension not allowed · `422` checksum mismatch · `429` too many active uploads · `500` unexpected (generic message, traceback logged) · `507` disk full.
+`400` malformed input · `403` operation disabled by config, or refused by the filesystem (`permission_denied`) · `404` unknown folder / file / upload · `409` exists, upload in progress, incomplete · `413` too large · `415` extension not allowed · `422` checksum mismatch · `429` too many active uploads · `500` unexpected (generic message, traceback logged) · `507` disk full.
 
 ## 7. Configuration
 

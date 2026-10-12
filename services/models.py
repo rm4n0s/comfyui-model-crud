@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import comfy, paths
-from .errors import UnknownFolder
+from .config import Config
+from .errors import DeleteDisabled, ModelFileNotFound, PermissionDenied, UnknownFolder
 
 log = logging.getLogger("comfyui-model-crud")
 
@@ -85,3 +86,28 @@ def _walk(root: paths.Root, allowed: frozenset[str]) -> Iterator[dict[str, Any]]
 
 def _iso_utc(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def delete_model(
+    folder_key: object, relpath: object, root_index: int | None, config: Config
+) -> dict[str, Any]:
+    """Delete exactly one model file (FR-D1..D5, SR-7). Blocking: call from a worker thread.
+
+    The enabled check comes first so a disabled server touches nothing, not even to say whether
+    the file exists. Empty parent folders are left in place (FR-D5).
+    """
+    if not config.delete_enabled:
+        raise DeleteDisabled()
+    resolved = paths.resolve_existing(folder_key, relpath, config.allowed_extensions, root_index)
+    try:
+        size = os.stat(resolved.real).st_size
+        # unlink the entry, not the realpath: for a symlink inside the root this removes the link
+        # and leaves whatever it points at alone. Never a directory: resolve_existing wants a file.
+        os.unlink(resolved.entry)
+    except FileNotFoundError:  # lost a race with another delete
+        raise ModelFileNotFound() from None
+    except PermissionError:
+        raise PermissionDenied() from None
+    comfy.invalidate_cache(resolved.folder)
+    log.info("Deleted model: folder=%s path=%s size=%d", resolved.folder, resolved.relpath, size)
+    return {"folder": resolved.folder, "path": resolved.relpath, "deleted": True}

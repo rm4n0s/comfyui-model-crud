@@ -7,6 +7,7 @@ waits on a directory walk.
 import asyncio
 import functools
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -14,7 +15,7 @@ from aiohttp import web
 
 from ..services import models
 from ..services.config import Config, get_config
-from ..services.errors import ModelCrudError
+from ..services.errors import BadRequest, ModelCrudError
 from ..services.version import VERSION
 
 log = logging.getLogger("comfyui-model-crud")
@@ -48,6 +49,26 @@ def api_handler(handler: Handler) -> Handler:
             return error_response(ModelCrudError())
 
     return wrapper
+
+
+def query_param(request: web.Request, name: str, *, required: bool = False) -> str | None:
+    """A query parameter that must appear at most once, so there is no ambiguity about which
+    value the server acted on."""
+    values = request.query.getall(name, [])
+    if len(values) > 1:
+        raise BadRequest(f"Query parameter '{name}' must not be repeated.")
+    if required and (not values or values[0] == ""):
+        raise BadRequest(f"Query parameter '{name}' is required.")
+    return values[0] if values else None
+
+
+def root_index_param(request: web.Request) -> int | None:
+    raw = query_param(request, "root_index")
+    if raw is None:
+        return None
+    if not re.fullmatch(r"[0-9]{1,6}", raw):
+        raise BadRequest("root_index must be a non-negative whole number.")
+    return int(raw)
 
 
 def describe_config(config: Config) -> dict[str, Any]:
@@ -84,3 +105,14 @@ def register_routes(routes: web.RouteTableDef) -> None:
         allowed = get_config().allowed_extensions
         files = await asyncio.to_thread(models.list_models, folder, allowed)
         return json_ok({"folder": folder, "files": files})
+
+    @routes.delete("/model_crud/models/{folder}")
+    @api_handler
+    async def delete_model(request: web.Request) -> web.StreamResponse:
+        folder = request.match_info["folder"]
+        path = query_param(request, "path", required=True)
+        root_index = root_index_param(request)
+        result = await asyncio.to_thread(
+            models.delete_model, folder, path, root_index, get_config()
+        )
+        return json_ok(result)
