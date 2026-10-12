@@ -42,6 +42,11 @@ class FakeFolderPaths(types.ModuleType):
         # Same shape as ComfyUI: key -> ([root, ...], {extension, ...})
         self.folder_names_and_paths: dict[str, tuple[list[str], set[str]]] = {}
         self.filename_list_cache: dict[str, object] = {}
+        # Like ComfyUI: siblings of models/, outside folder_names_and_paths, replaceable through
+        # set_input_directory / set_output_directory, so they are read through the getters.
+        base = Path(models_dir).parent
+        self.input_directory = str(base / "input")
+        self.output_directory = str(base / "output")
 
     def add_folder(self, key: str, *roots: Path) -> list[Path]:
         """Register ``key`` with ``roots`` (created on disk). Defaults to ``models/<key>``."""
@@ -53,6 +58,12 @@ class FakeFolderPaths(types.ModuleType):
             set(self.supported_pt_extensions),
         )
         return paths
+
+    def get_input_directory(self) -> str:
+        return self.input_directory
+
+    def get_output_directory(self) -> str:
+        return self.output_directory
 
     def get_folder_paths(self, folder_name: str) -> list[str]:
         return list(self.folder_names_and_paths[folder_name][0])
@@ -69,6 +80,8 @@ def folder_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeFolderP
     fake.add_folder("checkpoints")
     fake.add_folder("loras")
     fake.add_folder("vae")
+    Path(fake.input_directory).mkdir()
+    Path(fake.output_directory).mkdir()
     monkeypatch.setitem(sys.modules, "folder_paths", fake)
     return fake
 

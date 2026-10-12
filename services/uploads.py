@@ -12,6 +12,7 @@ can only be behind the data, never ahead of it: the worst case is re-sending a c
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -30,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol, TypeVar
 
 from . import comfy, fsutil, paths
-from .config import Config, get_config
+from .config import MEDIA_AREAS, Config, get_config
 from .errors import (
     BadChunk,
     BadRequest,
@@ -43,6 +44,7 @@ from .errors import (
     PermissionDenied,
     TooLarge,
     TooManyUploads,
+    UnknownFolder,
     UnknownUpload,
     UploadInProgress,
     UploadsDisabled,
@@ -92,6 +94,7 @@ class UploadSession:
     client_fingerprint: str | None
     created: float
     expires_at: float
+    area: str | None = None  # "input" / "output" for media uploads, None for model folders
     received: set[int] = field(default_factory=set)  # indices of fully written chunks
     state: str = OPEN
     active_writers: int = 0
@@ -181,6 +184,11 @@ class _Discard(Exception):
     """A persisted session that cannot be trusted or resumed; the message is the reason."""
 
 
+class _Skip(Exception):
+    """A persisted session that is valid but not ours to resume now (its area is switched off).
+    Its files are left alone."""
+
+
 class UploadManager:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -248,8 +256,13 @@ class UploadManager:
         subfolder: object = None,
         overwrite: object = False,
         client_fingerprint: object = None,
+        *,
+        area: str | None = None,
     ) -> UploadSession:
+        """Start an upload into a model folder, or into ``input``/``output`` if ``area`` is set
+        (then ``folder`` is ignored)."""
         self._require_enabled()
+        self._require_area(area)
         if not isinstance(overwrite, bool):
             raise BadRequest("'overwrite' must be true or false.")
         if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
@@ -257,9 +270,14 @@ class UploadManager:
         if client_fingerprint is not None and not _valid_fingerprint(client_fingerprint):
             raise BadRequest("'client_fingerprint' must be a short plain string.")
 
-        target = paths.resolve_upload_target(
-            folder, filename, subfolder, self.config.allowed_extensions
-        )
+        if area is None:
+            target = paths.resolve_upload_target(
+                folder, filename, subfolder, self.config.allowed_extensions
+            )
+        else:
+            target = paths.resolve_upload_target(
+                area, filename, subfolder, self.config.extensions_for_area(area), media=True
+            )
         if size > self.config.max_upload_bytes:
             raise TooLarge(
                 f"The upload limit is {self.config.max_upload_bytes} bytes on this server."
@@ -287,6 +305,7 @@ class UploadManager:
             client_fingerprint=client_fingerprint,  # type: ignore[arg-type]
             created=now,
             expires_at=now + self.config.upload_ttl_hours * 3600,
+            area=area,
         )
         # Reserve the slot before the first await so two racing creates cannot both pass the
         # checks above (single-threaded event loop: no await, no interleaving).
@@ -300,13 +319,17 @@ class UploadManager:
         session.saved_version = session.version
         return session
 
-    def status(self, upload_id: object) -> UploadSession:
+    def status(self, upload_id: object, area: str | None = None) -> UploadSession:
         self._require_enabled()
-        return self._get(upload_id)
+        self._require_area(area)
+        return self._get(upload_id, area)
 
-    def list_sessions(self) -> list[UploadSession]:
+    def list_sessions(self, area: str | None = None) -> list[UploadSession]:
+        """Sessions of one kind: model uploads for ``area=None``, else that area's uploads."""
         self._require_enabled()
-        return sorted(self.sessions.values(), key=lambda s: (s.created, s.id))
+        self._require_area(area)
+        found = (s for s in self.sessions.values() if s.area == area)
+        return sorted(found, key=lambda s: (s.created, s.id))
 
     async def write_chunk(
         self,
@@ -315,9 +338,11 @@ class UploadManager:
         stream: ChunkStream,
         content_length: int | None,
         sha256: str | None = None,
+        area: str | None = None,
     ) -> dict[str, int]:
         self._require_enabled()
-        session = self._get(upload_id)
+        self._require_area(area)
+        session = self._get(upload_id, area)
         if session.state != OPEN:
             raise UploadInProgress("The upload is being finalised.")
         if isinstance(index, bool) or not isinstance(index, int):
@@ -363,9 +388,12 @@ class UploadManager:
             "received_bytes": session.received_bytes,
         }
 
-    async def complete(self, upload_id: object, sha256: object = None) -> dict[str, Any]:
+    async def complete(
+        self, upload_id: object, sha256: object = None, area: str | None = None
+    ) -> dict[str, Any]:
         self._require_enabled()
-        session = self._get(upload_id)
+        self._require_area(area)
+        session = self._get(upload_id, area)
         if sha256 is not None and (not isinstance(sha256, str) or not SHA256_RE.fullmatch(sha256)):
             raise BadRequest("'sha256' must be 64 hexadecimal characters.")
         if session.state != OPEN:
@@ -387,18 +415,22 @@ class UploadManager:
         self._forget(session)
         async with session.save_lock():
             await self._run(self._remove_files, session.directory, session.id)
-        comfy.invalidate_cache(session.folder)
+        if area is None:
+            comfy.invalidate_cache(session.folder)  # input/output have no such cache
         log.info(
-            "Uploaded model: folder=%s path=%s size=%d",
+            "Uploaded %s: %s=%s path=%s size=%d",
+            "model" if area is None else "file",
+            "folder" if area is None else "area",
             session.folder,
             session.relpath,
             session.size,
         )
         return {"folder": session.folder, "path": session.relpath, "size": session.size}
 
-    async def cancel(self, upload_id: object) -> dict[str, Any]:
+    async def cancel(self, upload_id: object, area: str | None = None) -> dict[str, Any]:
         self._require_enabled()
-        session = self._get(upload_id)
+        self._require_area(area)
+        session = self._get(upload_id, area)
         if session.state != OPEN:
             raise UploadInProgress("The upload is being finalised.")
         self._forget(session)  # in-flight chunk handlers see `closed` and fail with 404
@@ -412,13 +444,18 @@ class UploadManager:
         if not self.config.upload_enabled:
             raise UploadsDisabled()
 
-    def _get(self, upload_id: object) -> UploadSession:
+    def _require_area(self, area: str | None) -> None:
+        if area is not None and not self.config.extensions_for_area(area):
+            raise UnknownFolder()
+
+    def _get(self, upload_id: object, area: str | None = None) -> UploadSession:
         # Validate the id before it is used for anything (SR-12): a bad id never reaches the
-        # filesystem and cannot select another session.
+        # filesystem and cannot select another session. A session is only reachable through the
+        # routes of its own kind: a model upload id is unknown under /input and vice versa.
         if not isinstance(upload_id, str) or not UPLOAD_ID_RE.fullmatch(upload_id):
             raise UnknownUpload()
         session = self.sessions.get(upload_id)
-        if session is None:
+        if session is None or session.area != area:
             raise UnknownUpload()
         return session
 
@@ -570,8 +607,14 @@ class UploadManager:
         """Rebuild sessions from sidecars and clean up what cannot be resumed (blocking)."""
         sessions: list[UploadSession] = []
         claimed: set[str] = set()
+        scanned: set[str] = set()
         for root in self._scan_roots():
             for directory, names in _artifact_directories(root.path):
+                # Roots can nest (``output/`` contains ComfyUI's ``output/checkpoints`` model
+                # root), so a directory can be reached through two roots. Look at it once.
+                if directory in scanned:
+                    continue
+                scanned.add(directory)
                 by_id: dict[str, dict[str, str]] = {}
                 for name in names:
                     match = ARTIFACT_RE.fullmatch(name)
@@ -586,11 +629,13 @@ class UploadManager:
                                 if kind in kinds:
                                     self._sweep_orphan(directory, kinds[kind], now)
                             continue
-                        session = self._restore(root, directory, upload_id, now)
+                        session = self._restore(directory, upload_id, now)
                         if session.final_path in claimed:
                             raise _Discard("another upload already targets this file")
                         claimed.add(session.final_path)
                         sessions.append(session)
+                    except _Skip:
+                        continue
                     except _Discard as why:
                         log.warning("Discarding unusable upload %s: %s", upload_id, why)
                         self._remove_files(directory, upload_id)
@@ -605,9 +650,16 @@ class UploadManager:
         seen: set[str] = set()
         roots: list[paths.Root] = []
         allowed = self.config.allowed_extensions
-        for key in sorted(comfy.folder_keys()):
+        candidates: list[Callable[[], list[paths.Root]]] = [
+            functools.partial(paths.get_roots, key, allowed) for key in sorted(comfy.folder_keys())
+        ]
+        candidates += [
+            functools.partial(paths.get_media_roots, area, self.config.extensions_for_area(area))
+            for area in MEDIA_AREAS
+        ]
+        for get in candidates:
             try:
-                key_roots = paths.get_roots(key, allowed)
+                key_roots = get()
             except ModelCrudError:
                 continue
             for root in key_roots:
@@ -629,9 +681,7 @@ class UploadManager:
                 os.unlink(os.path.join(directory, name))
             log.info("Removed orphaned upload file %s", name)
 
-    def _restore(
-        self, root: paths.Root, directory: str, upload_id: str, now: float
-    ) -> UploadSession:
+    def _restore(self, directory: str, upload_id: str, now: float) -> UploadSession:
         """Validate one sidecar. Nothing in the file is trusted: the target is re-resolved."""
         try:
             data = read_sidecar(os.path.join(directory, f".model_crud_{upload_id}.json"))
@@ -660,20 +710,34 @@ class UploadManager:
         received = _ranges_field(data, total)
 
         folder, relpath = data.get("folder"), data.get("path")
+        area = data.get("area")
         if not isinstance(folder, str) or not isinstance(relpath, str):
             raise _Discard("invalid target")
+        if area is not None and (area not in MEDIA_AREAS or folder != area):
+            raise _Discard("invalid area")
+        if area is not None and not self.config.extensions_for_area(area):
+            raise _Skip()
         subfolder, _, filename = relpath.rpartition("/")
         try:
-            target = paths.resolve_upload_target(
-                folder, filename, subfolder or None, self.config.allowed_extensions
-            )
+            if area is None:
+                target = paths.resolve_upload_target(
+                    folder, filename, subfolder or None, self.config.allowed_extensions
+                )
+            else:
+                target = paths.resolve_upload_target(
+                    area,
+                    filename,
+                    subfolder or None,
+                    self.config.extensions_for_area(area),
+                    media=True,
+                )
         except ModelCrudError:
             raise _Discard("target no longer valid") from None
-        # The sidecar must live exactly where the resolver says this upload belongs.
+        # The sidecar must live exactly where the resolver says this upload belongs. That also
+        # rules out sidecars in secondary roots, which uploads never use; comparing against the
+        # scanned root instead would discard valid sessions when roots nest.
         if target.relpath != relpath or target.directory != os.path.realpath(directory):
             raise _Discard("sidecar is not in its upload directory")
-        if target.root != root.path:
-            raise _Discard("sidecar is in the wrong model root")
 
         part = part_path(target.directory, upload_id)
         try:
@@ -697,6 +761,7 @@ class UploadManager:
             client_fingerprint=fingerprint,
             created=created,
             expires_at=expires_at,
+            area=area,
             received=received,
         )
         session.saved_version = session.version
@@ -715,6 +780,7 @@ def sidecar_payload(session: UploadSession) -> dict[str, Any]:
         "version": SIDECAR_VERSION,
         "upload_id": session.id,
         "folder": session.folder,
+        "area": session.area,
         "path": session.relpath,
         "size": session.size,
         "chunk_size": session.chunk_size,

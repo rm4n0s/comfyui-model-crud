@@ -495,10 +495,10 @@ async def test_scan_survives_an_unexpected_error_on_one_upload(
     first.shutdown()
     real = UploadManager._restore
 
-    def flaky(self, root, directory, upload_id, now):
+    def flaky(self, directory, upload_id, now):
         if upload_id == bad.id:
             raise RuntimeError("boom")
-        return real(self, root, directory, upload_id, now)
+        return real(self, directory, upload_id, now)
 
     monkeypatch.setattr(UploadManager, "_restore", flaky)
 

@@ -30,6 +30,51 @@ DEFAULT_EXTENSIONS: tuple[str, ...] = (
     ".onnx",
 )
 
+# ComfyUI's ``input/`` and ``output/`` directories (siblings of ``models/``, not model folders).
+# They are managed through their own routes, ``/model_crud/input`` and ``/model_crud/output``.
+MEDIA_AREAS: tuple[str, ...] = ("input", "output")
+
+# SR-4a. What ComfyUI nodes load from ``input/`` and save to ``output/``. Deliberately without
+# model files, ``.svg``/``.html``/``.js`` (active content) and anything executable.
+DEFAULT_MEDIA_EXTENSIONS: tuple[str, ...] = (
+    # images
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".avif",
+    ".exr",
+    # video
+    ".mp4",
+    ".webm",
+    ".mov",
+    ".mkv",
+    ".avi",
+    # audio
+    ".wav",
+    ".mp3",
+    ".flac",
+    ".ogg",
+    ".opus",
+    ".m4a",
+    ".aac",
+    # 3D
+    ".glb",
+    ".gltf",
+    ".obj",
+    ".ply",
+    ".stl",
+    # data
+    ".latent",
+    ".txt",
+    ".json",
+    ".csv",
+)
+
 # Temp files are named ``.model_crud_<id>.part`` (SR-6); allowing the suffix would make an
 # in-progress upload look like a model.
 _FORBIDDEN_EXTRA_EXTENSIONS = {".part"}
@@ -59,6 +104,8 @@ class Config:
     max_active_uploads: int = 4
     upload_ttl_hours: float = 24.0
     extra_extensions: tuple[str, ...] = field(default=())
+    media_folders: tuple[str, ...] = MEDIA_AREAS  # the enabled ones
+    extra_media_extensions: tuple[str, ...] = field(default=())
 
     @property
     def upload_enabled(self) -> bool:
@@ -72,6 +119,15 @@ class Config:
     def allowed_extensions(self) -> tuple[str, ...]:
         """Defaults first, then extras, without duplicates (order is shown to API clients)."""
         return tuple(dict.fromkeys((*DEFAULT_EXTENSIONS, *self.extra_extensions)))
+
+    @property
+    def media_extensions(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((*DEFAULT_MEDIA_EXTENSIONS, *self.extra_media_extensions)))
+
+    def extensions_for_area(self, area: object) -> tuple[str, ...]:
+        """The allowlist for ``input``/``output``; empty if that area is switched off or unknown,
+        which makes every endpoint answer ``unknown_folder`` for it."""
+        return self.media_extensions if area in self.media_folders else ()
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Config":
@@ -102,6 +158,10 @@ class Config:
             ),
             upload_ttl_hours=ttl,
             extra_extensions=get("EXTRA_EXTENSIONS", _extensions, defaults.extra_extensions),
+            media_folders=get("MEDIA_FOLDERS", _media_folders, defaults.media_folders),
+            extra_media_extensions=get(
+                "EXTRA_MEDIA_EXTENSIONS", _extensions, defaults.extra_media_extensions
+            ),
         )
 
 
@@ -153,6 +213,16 @@ def _extensions(raw: str) -> tuple[str, ...]:
             raise ConfigError(f"{item.strip()!r} is not a usable file extension")
         result.append(ext)
     return tuple(dict.fromkeys(result))
+
+
+def _media_folders(raw: str) -> tuple[str, ...]:
+    """``input,output`` (default), one of them, or ``none``."""
+    items = [i.strip().lower() for i in raw.split(",") if i.strip()]
+    if items == ["none"]:
+        return ()
+    if any(i not in MEDIA_AREAS for i in items):
+        raise ConfigError("expected input, output, input,output or none")
+    return tuple(dict.fromkeys(items))
 
 
 @functools.cache

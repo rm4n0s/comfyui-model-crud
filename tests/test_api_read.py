@@ -5,7 +5,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from comfyui_model_crud.api import routes as api_routes
 from comfyui_model_crud.services import models
-from comfyui_model_crud.services.config import get_config
+from comfyui_model_crud.services.config import DEFAULT_MEDIA_EXTENSIONS, get_config
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +74,8 @@ async def test_config_defaults(client):
             ".gguf",
             ".onnx",
         ],
+        "media_folders": ["input", "output"],
+        "media_extensions": list(DEFAULT_MEDIA_EXTENSIONS),
     }
 
 

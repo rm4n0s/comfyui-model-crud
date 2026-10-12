@@ -101,6 +101,14 @@ directory except the project directory is `tmpfs` (RAM-backed, 16 GB), including
 disk (large uploads, page-cache behaviour, fsync timing) must put its model folder inside the project directory, in a
 gitignored location such as `.bench/` or `.slow-test-tmp/`. Check with `stat -f` before trusting any I/O measurement.
 
+## Input and output directories
+
+- Layout of a ComfyUI checkout: `input/`, `output/`, `temp/`, `user/` and `models/` are siblings under the base directory. `input` and `output` are not in `folder_names_and_paths`; `folder_paths.get_input_directory()` / `get_output_directory()` return module globals that `set_input_directory()` / `set_output_directory()` (the `--input-directory` / `--output-directory` flags) replace, so they are read on every request. `output/` is created lazily by ComfyUI.
+- `LoadImage.INPUT_TYPES` (`nodes.py`) does `os.listdir(input_dir)` on every call and keeps regular files directly in `input/` that match the image content type: there is no cache to invalidate, and files in subfolders are not offered by that node.
+- `/view` serves `input`, `output` and `temp`. It forces active types (HTML, JS, CSS, SVG, XML) to download with `Content-Disposition: attachment` and `nosniff` (`server.py`), which is the guard against stored XSS. The media allowlist still leaves those types out so this extension never helps put them there.
+- ComfyUI adds `output/<key>` as a secondary root for several model keys, so `output` and a model root nest. Anything that scans roots must treat a directory reached through two roots once (SPEC FR-M8).
+- Checked live (commit e8665ca8): list, chunked upload with subfolder, delete, rejections and the switched-off area behaved as in SPEC §6.7; the extension-less `_output_images_will_be_put_here` placeholder is not listed.
+
 ## Frontend extension API, checked in a real browser (Step 8, frontend 1.55.14, Firefox 157)
 
 - A tab registered with `app.extensionManager.registerSidebarTab({ id, icon: "pi pi-folder-open", title, tooltip, label, type: "custom", render(el), destroy() })` appears in the sidebar and `render` is called each time the tab opens. Plain strings work for `title`/`tooltip`/`label` (core tabs pass i18n keys). `getSidebarTabs()` lists it.

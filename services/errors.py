@@ -37,7 +37,7 @@ class InvalidFilename(ModelCrudError):
 class PathOutsideRoot(ModelCrudError):
     status = 400
     code = "path_outside_root"
-    default_message = "Path escapes the model folder."
+    default_message = "Path escapes the folder."
 
 
 class BadChunk(ModelCrudError):
@@ -55,7 +55,7 @@ class UploadsDisabled(ModelCrudError):
 class DeleteDisabled(ModelCrudError):
     status = 403
     code = "delete_disabled"
-    default_message = "Deleting models is disabled on this server."
+    default_message = "Deleting is disabled on this server."
 
 
 class PermissionDenied(ModelCrudError):
@@ -67,7 +67,7 @@ class PermissionDenied(ModelCrudError):
 class UnknownFolder(ModelCrudError):
     status = 404
     code = "unknown_folder"
-    default_message = "Unknown model folder."
+    default_message = "Unknown folder."
 
 
 class ModelFileNotFound(ModelCrudError):

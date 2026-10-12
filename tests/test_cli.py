@@ -342,7 +342,7 @@ async def test_server_side_refusals_at_creation(env, loras, tmp_path, capsys):
     assert await run("--server", server, "--folder", "loras", str(bad_type)) == 1
     assert "extension" in capsys.readouterr().err
     assert await run("--server", server, "--folder", "nope", str(too_big)) == 1
-    assert "Unknown model folder" in capsys.readouterr().err
+    assert "Unknown folder" in capsys.readouterr().err
     assert list(loras.iterdir()) == []
 
 

@@ -14,6 +14,10 @@ dev = [
   "pytest-aiohttp",
   "aiohttp",
   "ruff",
+  # tests/test_openapi.py skips itself if these are missing
+  "pyyaml",
+  "jsonschema",
+  "openapi-spec-validator",
 ]
 
 [tool.comfy]

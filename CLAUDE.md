@@ -2,7 +2,7 @@
 
 ## Project
 
-`comfyui-model-crud` is a ComfyUI custom-node extension (GPL-3.0). It lets users **list, upload and delete model files** through:
+`comfyui-model-crud` is a ComfyUI custom-node extension (GPL-3.0). It lets users **list, upload and delete model files**, and the files in ComfyUI's `input` and `output` directories, through:
 
 1. a REST API served by ComfyUI's own aiohttp server, and
 2. a UI inside the ComfyUI frontend that calls that API.
@@ -14,6 +14,7 @@ The repo is new. The layout below is the intended structure; update this file wh
 ```
 __init__.py          # ComfyUI entry point: registers routes, exports WEB_DIRECTORY
 pyproject.toml       # Comfy Registry metadata ([tool.comfy]) + dev tooling config
+openapi.yaml         # OpenAPI 3.1 contract of every endpoint; tests/test_openapi.py fails if it drifts from the code
 api/                 # aiohttp route handlers (thin: parse request, call service, shape response)
 services/            # Pure-ish logic: path resolution, validation, file ops. No aiohttp imports.
 web/                 # Frontend JS served by ComfyUI (WEB_DIRECTORY = "./web"); web/package.json makes Node treat it as ESM
@@ -26,10 +27,11 @@ docs/                 # comfyui-notes.md (verified ComfyUI internals), later ben
 
 - **Entry point**: `__init__.py` must define `NODE_CLASS_MAPPINGS = {}` (empty is fine, this extension adds no nodes) and `WEB_DIRECTORY = "./web"`, and export both via `__all__`. Importing the package must register the routes as a side effect.
 - **Routes**: register on `PromptServer.instance.routes` (`from server import PromptServer`). ComfyUI exposes every route under both `/path` and `/api/path`; the frontend should call `api.fetchApi("/model_crud/...")` and never hardcode the `/api` prefix or a host.
-- **Namespace all routes** under `/model_crud/` to avoid colliding with core or other extensions (e.g. `GET /model_crud/folders`, `GET /model_crud/models/{folder}`, `POST /model_crud/uploads`, `DELETE /model_crud/models/{folder}?path=...`). [SPEC.md](SPEC.md) is the source of truth for endpoints, error codes and requirements; keep it and the README in sync with the code.
+- **Namespace all routes** under `/model_crud/` to avoid colliding with core or other extensions (e.g. `GET /model_crud/folders`, `GET /model_crud/models/{folder}`, `POST /model_crud/uploads`, `DELETE /model_crud/models/{folder}?path=...`). [SPEC.md](SPEC.md) is the source of truth for endpoints, error codes and requirements; keep it, `openapi.yaml` and the README in sync with the code: a changed route, parameter, response field or error code means editing all three.
 - **Model directories come from ComfyUI, never from hardcoded paths.** Use `folder_paths` (`folder_names_and_paths`, `get_folder_paths(name)`, `models_dir`, `supported_pt_extensions`). This is what makes `extra_model_paths.yaml` and custom model locations work. Do not assume `ComfyUI/models/...`.
 - A model "folder" in the API is a **ComfyUI folder key** (`checkpoints`, `loras`, `vae`, ...), not a filesystem path. Clients send the key; the server resolves it.
 - After an upload or delete, invalidate ComfyUI's cached listing so node dropdowns update: `folder_paths.filename_list_cache.pop(folder_key, None)` (verified to exist; the key is the canonical folder key, which is why legacy aliases like `unet` are rejected). See [docs/comfyui-notes.md](docs/comfyui-notes.md) for everything verified against ComfyUI's source.
+- `input` and `output` are **not** model folders or folder keys: they sit next to `models/`, are resolved with `folder_paths.get_input_directory()` / `get_output_directory()` on every call, and are served only by `/model_crud/input` and `/model_crud/output` (SPEC §5.5, §6.7). They use their own extension list (`Config.extensions_for_area`, SR-4a), never the model one, and upload sessions are scoped to their kind of route. Reuse `paths.resolve_*(..., media=True)`; do not add them to the model code paths.
 - Only expose folder keys whose ComfyUI extension set intersects our allowlist (FR-L1); `folder_names_and_paths` also contains `custom_nodes`, `datasets`, `configs`, ...
 - The listen address for SR-10 is `comfy.cli_args.args.listen` (guarded import), not `PromptServer.address`, which is unset while custom nodes load.
 - Import only what ComfyUI guarantees at runtime (`server`, `folder_paths`, `aiohttp`, stdlib). Do not add runtime Python dependencies unless unavoidable; if you do, list them in `requirements.txt` (ComfyUI Manager installs from it) and justify it in the PR.
@@ -40,7 +42,7 @@ docs/                 # comfyui-notes.md (verified ComfyUI internals), later ben
 This extension writes and deletes files on the host. ComfyUI has no built-in auth, and users often expose it on a LAN or tunnel. Treat every request as hostile.
 
 - **Path traversal**: resolve the target with `os.path.realpath` and verify it is inside one of `get_folder_paths(folder_key)` using `os.path.commonpath`. Reject `..`, absolute paths, drive letters, NUL bytes, and symlinks that escape the root. Do this check in one shared function in `services/` and use it for every operation; never build paths with raw string concatenation.
-- **Allowlist file extensions** (start from `folder_paths.supported_pt_extensions`: `.ckpt .pt .pt2 .bin .pth .safetensors .pkl .sft`, plus `.gguf` and `.onnx`; adding any other type needs a deliberate decision recorded in SPEC.md SR-4). Reject everything else on upload, and refuse to delete files that are not models.
+- **Allowlist file extensions** (this rule is about model folders; `input`/`output` have a separate list, SR-4a, that must stay free of model, executable and active-content types such as `.svg`/`.html`) (start from `folder_paths.supported_pt_extensions`: `.ckpt .pt .pt2 .bin .pth .safetensors .pkl .sft`, plus `.gguf` and `.onnx`; adding any other type needs a deliberate decision recorded in SPEC.md SR-4). Reject everything else on upload, and refuse to delete files that are not models.
 - **Uploads never overwrite silently.** Default to `409 Conflict` if the file exists; overwriting requires an explicit `overwrite=true`. Write to a temp file in the same directory and `os.replace` on success so a failed/aborted upload never leaves a half-written model that ComfyUI would list. Clean up the temp file on any error.
 - **Enforce the max upload size** at session creation and on every chunk (never trust `Content-Length` alone), and bound session count and preallocated space so anonymous clients can't fill the disk.
 - Upload endpoints after session creation accept only the `upload_id` (validated against a strict regex), never a path.

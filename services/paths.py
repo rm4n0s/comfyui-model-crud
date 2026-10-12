@@ -28,6 +28,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 
 from . import comfy
+from .config import MEDIA_AREAS
 from .errors import (
     BadRequest,
     ExtensionNotAllowed,
@@ -98,6 +99,13 @@ def get_roots(folder_key: object, allowed: Collection[str]) -> list[Root]:
     return [Root(i, os.path.realpath(p)) for i, p in enumerate(configured)]
 
 
+def get_media_roots(area: object, allowed: Collection[str]) -> list[Root]:
+    """The single root of ``input`` or ``output``. ``allowed`` is empty for a disabled area."""
+    if area not in MEDIA_AREAS or not allowed:
+        raise UnknownFolder()
+    return [Root(0, os.path.realpath(comfy.media_directory(str(area))))]
+
+
 def sanitize_filename(raw: object) -> str:
     """Reduce a client-supplied file name to a safe basename (SR-5).
 
@@ -123,12 +131,15 @@ def resolve_existing(
     relpath: object,
     allowed: Collection[str],
     root_index: int | None = None,
+    *,
+    media: bool = False,
 ) -> ResolvedPath:
     """Locate an existing regular file. Used by delete (and anything else that reads a path).
 
-    Without ``root_index`` the first root containing the file wins.
+    Without ``root_index`` the first root containing the file wins. With ``media`` the key is
+    ``input`` or ``output`` and is resolved to ComfyUI's directory of that name instead.
     """
-    roots = get_roots(folder_key, allowed)
+    roots = get_media_roots(folder_key, allowed) if media else get_roots(folder_key, allowed)
     segments = _parse_relative(relpath, folder_key)
     check_extension(segments[-1], allowed)
 
@@ -144,12 +155,14 @@ def resolve_upload_target(
     filename: object,
     subfolder: object,
     allowed: Collection[str],
+    *,
+    media: bool = False,
 ) -> ResolvedPath:
     """Resolve where an upload will be published. Always the first root (SPEC §13).
 
     Touches nothing on disk: the subfolder may not exist yet, and the caller creates it.
     """
-    roots = get_roots(folder_key, allowed)
+    roots = get_media_roots(folder_key, allowed) if media else get_roots(folder_key, allowed)
     name = sanitize_filename(filename)
     check_extension(name, allowed)
     segments = (

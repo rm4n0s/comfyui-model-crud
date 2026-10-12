@@ -25,12 +25,14 @@ def warn_if_exposed(config: Config) -> None:
     if addresses and not all(_is_loopback(a) for a in addresses):
         log.warning(
             "ComfyUI is listening on %s and has no authentication, so anyone who can reach it "
-            "can upload and delete model files. Set MODEL_CRUD_READ_ONLY=1 to disable writes.",
+            "can upload and delete model, input and output files. "
+            "Set MODEL_CRUD_READ_ONLY=1 to disable writes.",
             ", ".join(addresses),
         )
     if comfy.cors_enabled():
         log.warning(
             "--enable-cors-header replaces ComfyUI's origin check, so web pages on other sites "
-            "may be able to upload and delete model files through this browser's session. "
+            "may be able to upload and delete model, input and output files through this "
+            "browser's session. "
             "Set MODEL_CRUD_READ_ONLY=1 to disable writes."
         )

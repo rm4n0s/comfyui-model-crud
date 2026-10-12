@@ -1,0 +1,1059 @@
+openapi: 3.1.0
+
+info:
+  title: comfyui-model-crud
+  version: 0.1.0
+  license:
+    name: GPL-3.0
+    identifier: GPL-3.0-only
+  description: |
+    REST API of the **comfyui-model-crud** ComfyUI extension. It lists, uploads and deletes
+
+    * **model files** in ComfyUI's model folders (`checkpoints`, `loras`, `vae`, ...), and
+    * **media files** in ComfyUI's `input` and `output` directories, which sit next to `models/`
+      and are *not* model folders. They have their own routes: `/model_crud/input` and
+      `/model_crud/output`.
+
+    `SPEC.md` in the repository is the design document; this file is the contract for clients.
+    A test (`tests/test_openapi.py`) checks that it matches the routes and the responses of the code.
+
+    ## Base URL and `/api` prefix
+
+    The extension runs inside ComfyUI's own server (default `http://127.0.0.1:8188`). ComfyUI
+    serves every route twice, at `/model_crud/...` and at `/api/model_crud/...`; both are
+    identical. Browser code should call `api.fetchApi("/model_crud/...")` and never hard-code a
+    host or the prefix.
+
+    ## No authentication
+
+    ComfyUI has none, and neither does this API. Anyone who can reach the port can use every
+    endpoint, including delete. ComfyUI listens on `127.0.0.1` unless started with `--listen`.
+    Browsers are protected by ComfyUI's origin check (a cross-site request gets a plain `403`
+    from ComfyUI itself, not the JSON error below); scripts that send no `Origin` header are not
+    affected. Operators can switch writes off with `MODEL_CRUD_READ_ONLY=1`.
+
+    ## Conventions
+
+    * JSON in and out, except upload chunk bodies (raw bytes). JSON request bodies are limited
+      to 64 KiB (`413 too_large`).
+    * Every error has the same shape, `{"error": "<code>", "message": "<text>"}`, sometimes with
+      extra fields (`missing_ranges`). Branch on `error`, never on `message`.
+    * Paths in requests and responses are **relative** to the folder root, `/`-separated, and
+      never absolute. In a query string, URL-encode the slashes (`a%2Fb.png`).
+    * Timestamps are UTC, `YYYY-MM-DDTHH:MM:SSZ`.
+    * Responses carry `Cache-Control: no-store`.
+    * File names must be a plain basename: not empty, not starting with `.`, no control
+      characters, at most 255 bytes. Extensions are checked case-insensitively against the
+      allowlist of the target (`allowed_extensions` for model folders, `media_extensions` for
+      `input`/`output`, both from `GET /model_crud/config`).
+    * Nothing is hashed or opened by the listing calls.
+
+    ## Uploading a file (the only upload protocol)
+
+    Uploads are chunked, parallel and resumable. A small file is a one-chunk upload.
+
+    1. `GET /model_crud/config`: read `upload_enabled`, `max_upload_bytes`, and the extension
+       list that applies to your target.
+    2. `POST .../uploads` with `filename` and `size` (and optionally `subfolder`, `overwrite`,
+       `client_fingerprint`). The server answers with `upload_id`, `chunk_size`,
+       `total_chunks` and `max_parallel`. The **server dictates the chunk size**.
+    3. `PUT .../uploads/{upload_id}/chunks/{index}` for every `index` from `0` to
+       `total_chunks - 1`, in any order, up to `max_parallel` at a time. Chunk `i` covers bytes
+       `[i * chunk_size, min((i + 1) * chunk_size, size))` and the request needs an exact
+       `Content-Length`. Re-sending a chunk is always safe.
+    4. `POST .../uploads/{upload_id}/complete`. The file appears at its final path only now, by
+       an atomic rename. `409 incomplete_upload` lists `missing_ranges` if chunks are missing.
+
+    Resuming after a dropped connection, a client restart or a ComfyUI restart:
+    `GET .../uploads/{upload_id}` (or `GET .../uploads` and match your `client_fingerprint`)
+    returns `received_ranges`; send only the gaps, then complete.
+
+    Error handling for clients:
+
+    * `429` on a chunk, `5xx`, a network error or a timeout: retry the same chunk with
+      exponential backoff.
+    * `422 checksum_mismatch` on a chunk: the chunk was not recorded; send it again.
+    * `409 file_exists` at creation: pick another name or create with `overwrite: true`.
+      At completion the session and its data are kept; remove the conflict and call `complete`
+      again, or cancel.
+    * `507 insufficient_storage` at creation means the disk cannot hold the file; nothing was
+      written.
+    * Unfinished sessions expire after `MODEL_CRUD_UPLOAD_TTL_HOURS` (default 24) of inactivity
+      (`expires_at`). Cancel sessions you abandon: each reserves disk space, and at most
+      `MODEL_CRUD_MAX_ACTIVE_UPLOADS` (default 4) exist at once (`429 too_many_uploads`).
+
+    An upload session belongs to one *kind* of route. An id created under `/model_crud/uploads`
+    is `404 unknown_upload` under `/model_crud/input/uploads` and the other way round, and the
+    session lists are separate.
+
+    ## Deleting
+
+    Delete is permanent (no trash), one file per request, no wildcards, no directories. Missing
+    files are `404`, not silent successes.
+
+servers:
+  - url: http://127.0.0.1:8188
+    description: ComfyUI's default address
+  - url: http://127.0.0.1:8188/api
+    description: The same routes under ComfyUI's `/api` prefix
+
+tags:
+  - name: Server
+    description: What the server permits, and which model folders exist.
+  - name: Model files
+    description: List and delete files in a ComfyUI model folder.
+  - name: Input and output
+    description: List and delete files in ComfyUI's `input` and `output` directories.
+  - name: Model uploads
+    description: Chunked, resumable uploads into a model folder.
+  - name: Input and output uploads
+    description: Chunked, resumable uploads into `input` or `output`. Same protocol as model uploads.
+
+paths:
+  /model_crud/config:
+    get:
+      tags: [Server]
+      operationId: getConfig
+      summary: What the server permits
+      description: |
+        Call this first. It tells a client whether uploads and deletes are enabled and which
+        extensions, size limit and chunk size apply.
+      responses:
+        '200':
+          description: Server limits and switches.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Config' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/folders:
+    get:
+      tags: [Server]
+      operationId: listFolders
+      summary: List the model folders
+      description: |
+        Model folder keys that have at least one existing directory and hold model files
+        (`custom_nodes`, `configs`, `datasets` and similar are left out). `input` and `output`
+        are **not** listed: they are not model folders (see `/model_crud/{area}`).
+      responses:
+        '200':
+          description: Model folders, sorted by key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folders' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/models/{folder}:
+    parameters:
+      - $ref: '#/components/parameters/Folder'
+    get:
+      tags: [Model files]
+      operationId: listModels
+      summary: List the model files in a folder
+      description: |
+        Every file with an allowed model extension, recursively, across all roots of the folder
+        (a key can have several directories, for example from `extra_model_paths.yaml`).
+        Hidden files, upload temp files and symlinks that leave their root are not listed.
+      responses:
+        '200':
+          description: The files, sorted by `path` then `root_index`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelListing' }
+        '404': { $ref: '#/components/responses/UnknownFolder' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+    delete:
+      tags: [Model files]
+      operationId: deleteModel
+      summary: Delete one model file
+      description: |
+        Removes exactly one file with `os.unlink`. For a symlink inside the folder the link is
+        removed and its target is left alone. Empty parent folders stay. Without `root_index`
+        the first root that contains the path is used. Loader-node dropdowns in ComfyUI see the
+        change after the next refresh.
+      parameters:
+        - $ref: '#/components/parameters/Path'
+        - $ref: '#/components/parameters/RootIndex'
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteModelResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/DeleteForbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/ExtensionNotAllowed' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/{area}:
+    parameters:
+      - $ref: '#/components/parameters/Area'
+    get:
+      tags: [Input and output]
+      operationId: listMedia
+      summary: List the files in `input` or `output`
+      description: |
+        Every file with an allowed media extension below ComfyUI's `input/` or `output/`
+        directory, recursively. This is where generated images, videos and audio end up
+        (`output`) and where nodes such as `LoadImage` read from (`input`). A missing directory
+        (ComfyUI creates `output/` lazily) lists as empty. The listing is not paginated.
+        Model files, scripts, `.svg`/`.html` and hidden files are never listed.
+      responses:
+        '200':
+          description: The files, sorted by `path`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaListing' }
+        '404': { $ref: '#/components/responses/AreaOff' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+    delete:
+      tags: [Input and output]
+      operationId: deleteMedia
+      summary: Delete one file from `input` or `output`
+      description: |
+        Same rules as deleting a model file: one file, permanent, links removed not followed,
+        only files with a media extension (so a model or script in these directories cannot be
+        deleted here).
+      parameters:
+        - $ref: '#/components/parameters/Path'
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteMediaResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/DeleteForbidden' }
+        '404': { $ref: '#/components/responses/NotFoundOrAreaOff' }
+        '415': { $ref: '#/components/responses/ExtensionNotAllowed' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/uploads:
+    post:
+      tags: [Model uploads]
+      operationId: createModelUpload
+      summary: Start an upload into a model folder
+      description: |
+        Validates the target once, creates missing subfolders (depth at most 4) of the folder's
+        first root, reserves disk space with a temp file of the full size and returns the session.
+        Uploads always go to the first root of the folder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateModelUpload' }
+      responses:
+        '201':
+          description: Session created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelUploadSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/UploadForbidden' }
+        '404': { $ref: '#/components/responses/UnknownFolder' }
+        '409': { $ref: '#/components/responses/CreateConflict' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/ExtensionNotAllowed' }
+        '429': { $ref: '#/components/responses/TooManyUploads' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+    get:
+      tags: [Model uploads]
+      operationId: listModelUploads
+      summary: List unfinished model uploads
+      description: Oldest first. Use it to find a session to resume (match `client_fingerprint`).
+      responses:
+        '200':
+          description: Active sessions, without `received_ranges`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelUploadList' }
+        '403': { $ref: '#/components/responses/UploadsDisabled' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/uploads/{upload_id}:
+    parameters:
+      - $ref: '#/components/parameters/UploadId'
+    get:
+      tags: [Model uploads]
+      operationId: getModelUpload
+      summary: Status of a model upload (what to resume)
+      responses:
+        '200':
+          description: The session with its received chunk ranges.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelUploadStatus' }
+        '403': { $ref: '#/components/responses/UploadsDisabled' }
+        '404': { $ref: '#/components/responses/UnknownUpload' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+    delete:
+      tags: [Model uploads]
+      operationId: cancelModelUpload
+      summary: Cancel a model upload
+      description: Deletes the temp and state files and the session.
+      responses:
+        '200':
+          description: Cancelled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CancelResult' }
+        '403': { $ref: '#/components/responses/UploadsDisabled' }
+        '404': { $ref: '#/components/responses/UnknownUpload' }
+        '409': { $ref: '#/components/responses/UploadBusy' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/uploads/{upload_id}/chunks/{index}:
+    parameters:
+      - $ref: '#/components/parameters/UploadId'
+      - $ref: '#/components/parameters/ChunkIndex'
+    put:
+      tags: [Model uploads]
+      operationId: putModelChunk
+      summary: Send one chunk of a model upload
+      description: &chunk_description |
+        The body is the raw bytes of chunk `index` (0-based). `Content-Length` is required and
+        must equal `chunk_size`, or the remainder for the last chunk. Chunks may be sent
+        concurrently and in any order; at most `max_parallel` requests may be in flight per
+        session (more get `429`, retry after a short backoff). Re-sending a chunk rewrites the
+        same byte range and is safe. A chunk is recorded as received only after its whole body
+        was written to disk (and verified, if you sent `Upload-Chunk-SHA256`), so an aborted
+        request never leaves a damaged chunk marked as received. A body that stalls for 120 s is
+        abandoned with `400 bad_chunk`.
+      parameters:
+        - $ref: '#/components/parameters/ChunkSha256'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Chunk stored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChunkResult' }
+        '400': { $ref: '#/components/responses/BadChunk' }
+        '403': { $ref: '#/components/responses/UploadsDisabled' }
+        '404': { $ref: '#/components/responses/UnknownUpload' }
+        '409': { $ref: '#/components/responses/UploadBusy' }
+        '422': { $ref: '#/components/responses/ChecksumMismatch' }
+        '429': { $ref: '#/components/responses/TooManyUploads' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/uploads/{upload_id}/complete:
+    parameters:
+      - $ref: '#/components/parameters/UploadId'
+    post:
+      tags: [Model uploads]
+      operationId: completeModelUpload
+      summary: Publish a model upload
+      description: &complete_description |
+        Needs every chunk. Optionally verifies the SHA-256 of the whole file (a full read on the
+        server, roughly a minute for 50 GB on NVMe; this call can outlast a client's default
+        60 s timeout, so disable or raise it). Publishing is a rename inside the target
+        directory; without `overwrite` it never replaces an existing file. The body may be empty
+        or `{}`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompleteRequest' }
+      responses:
+        '201':
+          description: Published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompleteModelResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/UploadForbidden' }
+        '404': { $ref: '#/components/responses/UnknownUpload' }
+        '409': { $ref: '#/components/responses/CompleteConflict' }
+        '422': { $ref: '#/components/responses/ChecksumMismatch' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/{area}/uploads:
+    parameters:
+      - $ref: '#/components/parameters/Area'
+    post:
+      tags: [Input and output uploads]
+      operationId: createMediaUpload
+      summary: Start an upload into `input` or `output`
+      description: |
+        Like `createModelUpload`, but the target is the directory named in the URL, so there is
+        no `folder` field, and the extension must be in `media_extensions`. The directory is
+        created if it does not exist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateMediaUpload' }
+      responses:
+        '201':
+          description: Session created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaUploadSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/UploadForbidden' }
+        '404': { $ref: '#/components/responses/AreaOff' }
+        '409': { $ref: '#/components/responses/CreateConflict' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/ExtensionNotAllowed' }
+        '429': { $ref: '#/components/responses/TooManyUploads' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+    get:
+      tags: [Input and output uploads]
+      operationId: listMediaUploads
+      summary: List unfinished uploads of this area
+      description: Only this area's sessions, oldest first.
+      responses:
+        '200':
+          description: Active sessions, without `received_ranges`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaUploadList' }
+        '403': { $ref: '#/components/responses/UploadsDisabled' }
+        '404': { $ref: '#/components/responses/AreaOff' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/{area}/uploads/{upload_id}:
+    parameters:
+      - $ref: '#/components/parameters/Area'
+      - $ref: '#/components/parameters/UploadId'
+    get:
+      tags: [Input and output uploads]
+      operationId: getMediaUpload
+      summary: Status of an `input`/`output` upload (what to resume)
+      responses:
+        '200':
+          description: The session with its received chunk ranges.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaUploadStatus' }
+        '403': { $ref: '#/components/responses/UploadsDisabled' }
+        '404': { $ref: '#/components/responses/UnknownUploadOrAreaOff' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+    delete:
+      tags: [Input and output uploads]
+      operationId: cancelMediaUpload
+      summary: Cancel an `input`/`output` upload
+      responses:
+        '200':
+          description: Cancelled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CancelResult' }
+        '403': { $ref: '#/components/responses/UploadsDisabled' }
+        '404': { $ref: '#/components/responses/UnknownUploadOrAreaOff' }
+        '409': { $ref: '#/components/responses/UploadBusy' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/{area}/uploads/{upload_id}/chunks/{index}:
+    parameters:
+      - $ref: '#/components/parameters/Area'
+      - $ref: '#/components/parameters/UploadId'
+      - $ref: '#/components/parameters/ChunkIndex'
+    put:
+      tags: [Input and output uploads]
+      operationId: putMediaChunk
+      summary: Send one chunk of an `input`/`output` upload
+      description: *chunk_description
+      parameters:
+        - $ref: '#/components/parameters/ChunkSha256'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Chunk stored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChunkResult' }
+        '400': { $ref: '#/components/responses/BadChunk' }
+        '403': { $ref: '#/components/responses/UploadsDisabled' }
+        '404': { $ref: '#/components/responses/UnknownUploadOrAreaOff' }
+        '409': { $ref: '#/components/responses/UploadBusy' }
+        '422': { $ref: '#/components/responses/ChecksumMismatch' }
+        '429': { $ref: '#/components/responses/TooManyUploads' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+  /model_crud/{area}/uploads/{upload_id}/complete:
+    parameters:
+      - $ref: '#/components/parameters/Area'
+      - $ref: '#/components/parameters/UploadId'
+    post:
+      tags: [Input and output uploads]
+      operationId: completeMediaUpload
+      summary: Publish an `input`/`output` upload
+      description: *complete_description
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompleteRequest' }
+      responses:
+        '201':
+          description: Published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompleteMediaResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/UploadForbidden' }
+        '404': { $ref: '#/components/responses/UnknownUploadOrAreaOff' }
+        '409': { $ref: '#/components/responses/CompleteConflict' }
+        '422': { $ref: '#/components/responses/ChecksumMismatch' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
+        '500': { $ref: '#/components/responses/Unexpected' }
+
+components:
+  parameters:
+    Folder:
+      name: folder
+      in: path
+      required: true
+      description: A model folder key from `GET /model_crud/folders` (`loras`, `checkpoints`, ...), not a filesystem path. Legacy aliases such as `unet` are `unknown_folder`.
+      schema: { type: string, examples: [loras] }
+    Area:
+      name: area
+      in: path
+      required: true
+      description: |
+        ComfyUI's `input` or `output` directory. Any other value does not match a route (`404`).
+        `input` and `output` can be switched off with `MODEL_CRUD_MEDIA_FOLDERS`; then every route
+        for that area answers `404 unknown_folder`.
+      schema: { type: string, enum: [input, output] }
+    Path:
+      name: path
+      in: query
+      required: true
+      description: |
+        Path of the file relative to the folder root, `/`-separated, URL-encoded (`a%2Fb.png`).
+        Must appear exactly once. Absolute paths, `..`, `.`, empty segments, backslashes, drive
+        letters and NUL are `400 path_outside_root`.
+      schema: { type: string, minLength: 1, maxLength: 4096, examples: ['sdxl/detail.safetensors'] }
+    RootIndex:
+      name: root_index
+      in: query
+      required: false
+      description: Which root of the folder to delete from, as given by `root_index` in the listing. Only needed when the same relative path exists in several roots.
+      schema: { type: integer, minimum: 0, maximum: 999999 }
+    UploadId:
+      name: upload_id
+      in: path
+      required: true
+      description: The 128-bit random id returned when the session was created.
+      schema: { type: string, pattern: '^[A-Za-z0-9_-]{22,64}$' }
+    ChunkIndex:
+      name: index
+      in: path
+      required: true
+      description: Zero-based chunk number, below `total_chunks`.
+      schema: { type: integer, minimum: 0, maximum: 999999999 }
+    ChunkSha256:
+      name: Upload-Chunk-SHA256
+      in: header
+      required: false
+      description: SHA-256 of this chunk's bytes. If present it is verified while the body streams; a mismatch is `422` and the chunk is not recorded.
+      schema: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Machine-readable code. Branch on this.
+          enum:
+            - bad_request
+            - invalid_filename
+            - path_outside_root
+            - bad_chunk
+            - uploads_disabled
+            - delete_disabled
+            - permission_denied
+            - unknown_folder
+            - file_not_found
+            - unknown_upload
+            - file_exists
+            - upload_in_progress
+            - incomplete_upload
+            - too_large
+            - extension_not_allowed
+            - checksum_mismatch
+            - too_many_uploads
+            - insufficient_storage
+            - internal_error
+        message:
+          type: string
+          description: Human-readable text. Never contains a server path.
+      examples:
+        - { error: file_not_found, message: File not found. }
+
+    IncompleteUploadError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [missing_ranges]
+          properties:
+            missing_ranges:
+              $ref: '#/components/schemas/ChunkRanges'
+
+    ChunkRanges:
+      type: array
+      description: Inclusive ranges of chunk indices, `[first, last]`.
+      items:
+        type: array
+        prefixItems:
+          - { type: integer, minimum: 0 }
+          - { type: integer, minimum: 0 }
+        minItems: 2
+        maxItems: 2
+      examples:
+        - [[0, 311], [313, 520]]
+
+    Timestamp:
+      type: string
+      format: date-time
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+      examples: ['2026-10-01T12:30:00Z']
+
+    Config:
+      type: object
+      required:
+        - version
+        - upload_enabled
+        - delete_enabled
+        - max_upload_bytes
+        - chunk_size
+        - max_parallel
+        - allowed_extensions
+        - media_folders
+        - media_extensions
+      properties:
+        version: { type: string, examples: [0.1.0] }
+        upload_enabled:
+          type: boolean
+          description: False if `MODEL_CRUD_READ_ONLY=1` or `MODEL_CRUD_ALLOW_UPLOAD=0`. All upload routes are then `403 uploads_disabled`.
+        delete_enabled:
+          type: boolean
+          description: False if `MODEL_CRUD_READ_ONLY=1` or `MODEL_CRUD_ALLOW_DELETE=0`. All delete routes are then `403 delete_disabled`.
+        max_upload_bytes:
+          type: integer
+          description: Largest file that can be uploaded (default 100 GiB).
+        chunk_size:
+          type: integer
+          description: Chunk size in bytes the server will dictate (default 64 MiB). The actual value for a session is in the session.
+        max_parallel:
+          type: integer
+          description: Concurrent chunk requests per upload the server accepts.
+        allowed_extensions:
+          type: array
+          items: { type: string }
+          description: Extensions accepted in **model folders**, lower case with the dot.
+          examples:
+            - ['.safetensors', '.ckpt', '.pt', '.pt2', '.pth', '.bin', '.pkl', '.sft', '.gguf', '.onnx']
+        media_folders:
+          type: array
+          items: { type: string, enum: [input, output] }
+          description: The enabled areas. Empty if both are switched off.
+        media_extensions:
+          type: array
+          items: { type: string }
+          description: Extensions accepted in `input` and `output`. Defaults cover images, video, audio, 3D files, `.latent`, `.txt`, `.json` and `.csv`; never models, `.svg`, `.html`, `.js` or executables.
+
+    Folders:
+      type: object
+      required: [folders]
+      properties:
+        folders:
+          type: array
+          items:
+            type: object
+            required: [key, roots]
+            properties:
+              key: { type: string, examples: [loras] }
+              roots:
+                type: integer
+                description: Number of configured directories for this key. Every `root_index` is below it.
+            additionalProperties: false
+
+    ModelFile:
+      type: object
+      required: [path, name, size, modified, root_index]
+      properties:
+        path: { type: string, description: Relative to the root, examples: ['sdxl/detail.safetensors'] }
+        name: { type: string, examples: [detail.safetensors] }
+        size: { type: integer, description: Bytes }
+        modified: { $ref: '#/components/schemas/Timestamp' }
+        root_index:
+          type: integer
+          description: Index of the root the file is in; tells apart the same relative path in two roots.
+      additionalProperties: false
+
+    ModelListing:
+      type: object
+      required: [folder, files]
+      properties:
+        folder: { type: string }
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/ModelFile' }
+
+    MediaFile:
+      type: object
+      required: [path, name, size, modified]
+      properties:
+        path: { type: string, description: Relative to `input/` or `output/`, examples: ['2026/10/ComfyUI_00001_.png'] }
+        name: { type: string, examples: [ComfyUI_00001_.png] }
+        size: { type: integer, description: Bytes }
+        modified: { $ref: '#/components/schemas/Timestamp' }
+      additionalProperties: false
+
+    MediaListing:
+      type: object
+      required: [area, files]
+      properties:
+        area: { type: string, enum: [input, output] }
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/MediaFile' }
+
+    DeleteModelResult:
+      type: object
+      required: [folder, path, deleted]
+      properties:
+        folder: { type: string }
+        path: { type: string }
+        deleted: { type: boolean, const: true }
+
+    DeleteMediaResult:
+      type: object
+      required: [area, path, deleted]
+      properties:
+        area: { type: string, enum: [input, output] }
+        path: { type: string }
+        deleted: { type: boolean, const: true }
+
+    UploadTarget:
+      type: object
+      description: Fields shared by the model and the media create requests.
+      required: [filename, size]
+      properties:
+        filename:
+          type: string
+          description: A plain basename. Any directory part is dropped. Extension checked against the allowlist.
+          examples: [detail.safetensors]
+        size:
+          type: integer
+          minimum: 1
+          description: Total size in bytes. At most `max_upload_bytes`, and the disk must have this much plus 1 GiB free.
+        subfolder:
+          type: [string, 'null']
+          description: Relative subfolder to upload into, created if missing, at most 4 levels deep.
+          examples: [sdxl]
+        overwrite:
+          type: boolean
+          default: false
+          description: Replace an existing file when the upload completes. Without it an existing file is `409 file_exists`.
+        client_fingerprint:
+          type: [string, 'null']
+          maxLength: 512
+          description: Opaque string stored with the session so a client can find it again after a restart (the web UI sends `name:size:lastModified`). Plain text, no control characters.
+          examples: ['big.safetensors:53687091200:1760000000000']
+
+    CreateModelUpload:
+      allOf:
+        - $ref: '#/components/schemas/UploadTarget'
+        - type: object
+          required: [folder]
+          properties:
+            folder:
+              type: string
+              description: Model folder key.
+              examples: [checkpoints]
+
+    CreateMediaUpload:
+      allOf:
+        - $ref: '#/components/schemas/UploadTarget'
+
+    UploadSessionCore:
+      type: object
+      required: [upload_id, path, size, chunk_size, total_chunks, expires_at]
+      properties:
+        upload_id: { type: string, pattern: '^[A-Za-z0-9_-]{22,64}$' }
+        path:
+          type: string
+          description: Final relative path (subfolder and sanitized file name).
+        size: { type: integer }
+        chunk_size: { type: integer, description: Bytes per chunk, set by the server. The last chunk is the remainder. }
+        total_chunks: { type: integer, minimum: 1 }
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    ModelUploadSession:
+      description: Response to creating a model upload.
+      allOf:
+        - $ref: '#/components/schemas/UploadSessionCore'
+        - type: object
+          required: [folder, max_parallel]
+          properties:
+            folder: { type: string }
+            max_parallel: { type: integer }
+
+    MediaUploadSession:
+      description: Response to creating an `input`/`output` upload.
+      allOf:
+        - $ref: '#/components/schemas/UploadSessionCore'
+        - type: object
+          required: [area, max_parallel]
+          properties:
+            area: { type: string, enum: [input, output] }
+            max_parallel: { type: integer }
+
+    UploadProgress:
+      type: object
+      required: [received_bytes, client_fingerprint]
+      properties:
+        received_bytes: { type: integer }
+        client_fingerprint: { type: [string, 'null'] }
+
+    ModelUploadSummary:
+      allOf:
+        - $ref: '#/components/schemas/UploadSessionCore'
+        - $ref: '#/components/schemas/UploadProgress'
+        - type: object
+          required: [folder]
+          properties:
+            folder: { type: string }
+
+    MediaUploadSummary:
+      allOf:
+        - $ref: '#/components/schemas/UploadSessionCore'
+        - $ref: '#/components/schemas/UploadProgress'
+        - type: object
+          required: [area]
+          properties:
+            area: { type: string, enum: [input, output] }
+
+    ModelUploadStatus:
+      allOf:
+        - $ref: '#/components/schemas/ModelUploadSummary'
+        - type: object
+          required: [received_ranges]
+          properties:
+            received_ranges: { $ref: '#/components/schemas/ChunkRanges' }
+
+    MediaUploadStatus:
+      allOf:
+        - $ref: '#/components/schemas/MediaUploadSummary'
+        - type: object
+          required: [received_ranges]
+          properties:
+            received_ranges: { $ref: '#/components/schemas/ChunkRanges' }
+
+    ModelUploadList:
+      type: object
+      required: [uploads]
+      properties:
+        uploads:
+          type: array
+          items: { $ref: '#/components/schemas/ModelUploadSummary' }
+
+    MediaUploadList:
+      type: object
+      required: [uploads]
+      properties:
+        uploads:
+          type: array
+          items: { $ref: '#/components/schemas/MediaUploadSummary' }
+
+    ChunkResult:
+      type: object
+      required: [index, received_chunks, received_bytes]
+      properties:
+        index: { type: integer }
+        received_chunks: { type: integer, description: How many chunks are now recorded. }
+        received_bytes: { type: integer }
+
+    CompleteRequest:
+      type: object
+      properties:
+        sha256:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: SHA-256 of the whole file. If given the server hashes the assembled file and rejects a mismatch with `422` (the session and temp file are kept).
+
+    CompleteModelResult:
+      type: object
+      required: [folder, path, size]
+      properties:
+        folder: { type: string }
+        path: { type: string }
+        size: { type: integer }
+
+    CompleteMediaResult:
+      type: object
+      required: [area, path, size]
+      properties:
+        area: { type: string, enum: [input, output] }
+        path: { type: string }
+        size: { type: integer }
+
+    CancelResult:
+      type: object
+      required: [upload_id, cancelled]
+      properties:
+        upload_id: { type: string }
+        cancelled: { type: boolean, const: true }
+
+  responses:
+    Unexpected:
+      description: An unexpected server error. The body is generic; the details are in ComfyUI's log.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: internal_error, message: Internal error. }
+    BadRequest:
+      description: |
+        Malformed input: `bad_request` (missing, repeated or malformed field, body not a JSON
+        object, bad `root_index`, `sha256`, `size`, subfolder deeper than 4), `invalid_filename`,
+        or `path_outside_root` (traversal, absolute path, symlink leaving the root; also logged
+        as a warning on the server).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: path_outside_root, message: Path escapes the folder. }
+    BadChunk:
+      description: |
+        `bad_chunk`: index out of range, `Content-Length` missing or not the exact expected
+        length, body shorter or longer than declared, or stalled for 120 s. `bad_request`: a
+        malformed `Upload-Chunk-SHA256`.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: bad_chunk, message: Chunk 3 must be sent with Content-Length 67108864. }
+    UploadsDisabled:
+      description: '`uploads_disabled`: the server has uploads switched off.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: uploads_disabled, message: Uploads are disabled on this server. }
+    UploadForbidden:
+      description: '`uploads_disabled`, or `permission_denied` if the operating system refused to write.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: uploads_disabled, message: Uploads are disabled on this server. }
+    DeleteForbidden:
+      description: '`delete_disabled`, or `permission_denied` if the operating system refused to remove the file.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: delete_disabled, message: Deleting is disabled on this server. }
+    UnknownFolder:
+      description: '`unknown_folder`: not a model folder key (including legacy aliases and non-model keys such as `custom_nodes`, `input` and `output`).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: unknown_folder, message: Unknown folder. }
+    AreaOff:
+      description: '`unknown_folder`: this area is switched off (`MODEL_CRUD_MEDIA_FOLDERS`).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: unknown_folder, message: Unknown folder. }
+    NotFound:
+      description: '`unknown_folder`, or `file_not_found` (also when the name is a directory).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: file_not_found, message: File not found. }
+    NotFoundOrAreaOff:
+      description: '`file_not_found` (also when the name is a directory), or `unknown_folder` if the area is switched off.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: file_not_found, message: File not found. }
+    UnknownUpload:
+      description: '`unknown_upload`: no such session, a malformed id, or a session that belongs to the other kind of route.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: unknown_upload, message: Unknown upload. }
+    UnknownUploadOrAreaOff:
+      description: '`unknown_upload` (no such session, malformed id, or a session of the other kind of route), or `unknown_folder` if the area is switched off.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: unknown_upload, message: Unknown upload. }
+    CreateConflict:
+      description: |
+        `file_exists`: a file (or a directory) with that name exists and `overwrite` is not true,
+        or a file exists where the subfolder should be. `upload_in_progress`: another session
+        already targets this file.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: file_exists, message: A file with this name already exists. }
+    CompleteConflict:
+      description: |
+        `incomplete_upload` (the body also has `missing_ranges`), `upload_in_progress` (a chunk
+        is still being received, or another `complete` is running) or `file_exists` (the target
+        appeared meanwhile; the session stays open with its data).
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/IncompleteUploadError'
+              - $ref: '#/components/schemas/Error'
+          example: { error: incomplete_upload, message: Not all chunks have been received., missing_ranges: [[1, 2], [5, 9]] }
+    UploadBusy:
+      description: '`upload_in_progress`: the session is being finalised.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: upload_in_progress, message: The upload is being finalised. }
+    TooLarge:
+      description: '`too_large`: the declared size is above `max_upload_bytes`, or the JSON body is over 64 KiB.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: too_large, message: The upload limit is 107374182400 bytes on this server. }
+    ExtensionNotAllowed:
+      description: '`extension_not_allowed`: the extension is not on the allowlist for this target (case-insensitive, last extension only, so `x.safetensors.exe` fails).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: extension_not_allowed, message: This file extension is not allowed. }
+    ChecksumMismatch:
+      description: |
+        `checksum_mismatch`. For a chunk: it was not recorded, send it again. For `complete`: the
+        session and its temp file are kept so you can re-send a damaged chunk or cancel.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: checksum_mismatch, message: Checksum does not match. }
+    TooManyUploads:
+      description: |
+        `too_many_uploads`. At creation: the server already has the maximum number of sessions.
+        For a chunk: more than `max_parallel` chunk requests are in flight for this session.
+        Retry after a short backoff.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: too_many_uploads, message: Too many uploads are in progress. }
+    InsufficientStorage:
+      description: '`insufficient_storage`: not enough free disk space (normally reported at creation, before anything is sent).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: insufficient_storage, message: Not enough free disk space. }

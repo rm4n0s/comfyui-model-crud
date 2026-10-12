@@ -14,7 +14,7 @@ from typing import Any
 
 from aiohttp import web
 
-from ..services import models, uploads
+from ..services import media, models, uploads
 from ..services.config import Config, get_config
 from ..services.errors import BadChunk, BadRequest, ModelCrudError, TooLarge
 from ..services.version import VERSION
@@ -107,6 +107,18 @@ def chunk_index(raw: str) -> int:
     return int(raw)
 
 
+def area_of(request: web.Request) -> str | None:
+    """``input`` / ``output`` on the media routes, None on the model routes."""
+    return request.match_info.get("area")
+
+
+def for_area(body: dict[str, Any], area: str | None) -> dict[str, Any]:
+    """Media responses say ``area`` where model responses say ``folder`` (SPEC §6.7)."""
+    if area is not None:
+        body = {"area": body.pop("folder"), **body}
+    return body
+
+
 def describe_session(session: uploads.UploadSession) -> dict[str, Any]:
     config = uploads.get_manager().config
     return {
@@ -164,6 +176,8 @@ def describe_config(config: Config) -> dict[str, Any]:
         "chunk_size": config.chunk_size,
         "max_parallel": config.max_parallel,
         "allowed_extensions": list(config.allowed_extensions),
+        "media_folders": list(config.media_folders),
+        "media_extensions": list(config.media_extensions),
     }
 
 
@@ -201,21 +215,45 @@ def register_routes(routes: web.RouteTableDef) -> None:
         )
         return json_ok(result)
 
+    # The upload handlers serve both kinds of target: /model_crud/uploads... (model folders, the
+    # folder is in the body) and /model_crud/{input|output}/uploads... (the area is in the URL).
+    # A session is only reachable through the routes of its own kind.
+
+    @routes.get("/model_crud/{area:input|output}")
+    @api_handler
+    async def get_media(request: web.Request) -> web.StreamResponse:
+        area = request.match_info["area"]
+        files = await asyncio.to_thread(media.list_files, area, get_config())
+        return json_ok({"area": area, "files": files})
+
+    @routes.delete("/model_crud/{area:input|output}")
+    @api_handler
+    async def delete_media(request: web.Request) -> web.StreamResponse:
+        path = query_param(request, "path", required=True)
+        result = await asyncio.to_thread(
+            media.delete_file, request.match_info["area"], path, get_config()
+        )
+        return json_ok(result)
+
     @routes.post("/model_crud/uploads")
+    @routes.post("/model_crud/{area:input|output}/uploads")
     @api_handler
     async def create_upload(request: web.Request) -> web.StreamResponse:
         body = await read_json_object(request)
+        area = area_of(request)
         session = await uploads.get_manager().create_session(
-            folder=required_field(body, "folder"),
+            folder=None if area else required_field(body, "folder"),
             filename=required_field(body, "filename"),
             size=required_field(body, "size"),
             subfolder=body.get("subfolder"),
             overwrite=body.get("overwrite", False),
             client_fingerprint=body.get("client_fingerprint"),
+            area=area,
         )
-        return json_ok(describe_session(session), status=201)
+        return json_ok(for_area(describe_session(session), area), status=201)
 
     @routes.put("/model_crud/uploads/{upload_id}/chunks/{index}")
+    @routes.put("/model_crud/{area:input|output}/uploads/{upload_id}/chunks/{index}")
     @api_handler
     async def put_chunk(request: web.Request) -> web.StreamResponse:
         # Streamed from request.content: request.read()/post()/multipart() would buffer the
@@ -227,31 +265,43 @@ def register_routes(routes: web.RouteTableDef) -> None:
             request.content,
             request.content_length,
             request.headers.get("Upload-Chunk-SHA256"),
+            area_of(request),
         )
         return json_ok(result)
 
     @routes.post("/model_crud/uploads/{upload_id}/complete")
+    @routes.post("/model_crud/{area:input|output}/uploads/{upload_id}/complete")
     @api_handler
     async def complete_upload(request: web.Request) -> web.StreamResponse:
         body = await read_json_object(request)
+        area = area_of(request)
         result = await uploads.get_manager().complete(
-            request.match_info["upload_id"], body.get("sha256")
+            request.match_info["upload_id"], body.get("sha256"), area
         )
-        return json_ok(result, status=201)
+        return json_ok(for_area(result, area), status=201)
 
     @routes.delete("/model_crud/uploads/{upload_id}")
+    @routes.delete("/model_crud/{area:input|output}/uploads/{upload_id}")
     @api_handler
     async def cancel_upload(request: web.Request) -> web.StreamResponse:
-        return json_ok(await uploads.get_manager().cancel(request.match_info["upload_id"]))
+        result = await uploads.get_manager().cancel(
+            request.match_info["upload_id"], area_of(request)
+        )
+        return json_ok(result)
 
     @routes.get("/model_crud/uploads")
+    @routes.get("/model_crud/{area:input|output}/uploads")
     @api_handler
     async def list_uploads(request: web.Request) -> web.StreamResponse:
-        found = uploads.get_manager().list_sessions()
-        return json_ok({"uploads": [describe_status(s, ranges=False) for s in found]})
+        area = area_of(request)
+        found = uploads.get_manager().list_sessions(area)
+        listing = [for_area(describe_status(s, ranges=False), area) for s in found]
+        return json_ok({"uploads": listing})
 
     @routes.get("/model_crud/uploads/{upload_id}")
+    @routes.get("/model_crud/{area:input|output}/uploads/{upload_id}")
     @api_handler
     async def get_upload(request: web.Request) -> web.StreamResponse:
-        session = uploads.get_manager().status(request.match_info["upload_id"])
-        return json_ok(describe_status(session, ranges=True))
+        area = area_of(request)
+        session = uploads.get_manager().status(request.match_info["upload_id"], area)
+        return json_ok(for_area(describe_status(session, ranges=True), area))

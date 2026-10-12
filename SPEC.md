@@ -6,8 +6,9 @@ Status: draft v0.1 · License: GPL-3.0
 
 A ComfyUI custom-node extension that adds model-file management to a running ComfyUI instance:
 
-- a **REST API** to list, upload and delete model files, and
-- a **UI** in the ComfyUI frontend that uses that API.
+- a **REST API** to list, upload and delete model files,
+- the same operations for the files in ComfyUI's `input` and `output` directories, under their own routes (§5.5, §6.7; API only, no UI yet), and
+- a **UI** in the ComfyUI frontend that uses the model API.
 
 It runs inside the ComfyUI process (aiohttp server) and adds no workflow nodes.
 
@@ -26,7 +27,8 @@ It runs inside the ComfyUI process (aiohttp server) and adds no workflow nodes.
 - Editing model contents, converting formats, reading safetensors metadata or previews.
 - Authentication or user management (ComfyUI has none; see §8).
 - Trash, undo or soft delete: delete permanently removes the file (`os.unlink`), which is why the UI confirmation (FR-UI4) is mandatory.
-- Managing non-model files (workflows, outputs, custom nodes).
+- Managing any other files: workflows, custom nodes, the temp and user directories. Besides the model folders, only the `input` and `output` directories are managed, through separate routes (§5.5).
+- A UI for `input` and `output` (the API exists, §5.5; the sidebar tab manages models only).
 
 ## 3. Users and use cases
 
@@ -36,10 +38,13 @@ It runs inside the ComfyUI process (aiohttp server) and adds no workflow nodes.
 | U2 | Remote/cloud user uploads a `.safetensors` checkpoint from their browser to the server. |
 | U3 | User deletes an unused model and sees it disappear from loader dropdowns. |
 | U4 | Developer/automation script lists, uploads and deletes models via HTTP. |
+| U5 | Remote/cloud user or script uploads a reference image or video into `input/` so a `LoadImage` node can use it. |
+| U6 | Script lists the `output/` directory and deletes generated files it no longer needs, to free disk space. |
 
 ## 4. Terminology
 
 - **Folder key**: ComfyUI's name for a model category (`checkpoints`, `loras`, `vae`, `controlnet`, ...), as in `folder_paths.folder_names_and_paths`. Clients only ever send folder keys, never filesystem paths. Only canonical keys (those present in `folder_names_and_paths`) are accepted; legacy aliases such as `unet` and `clip` are `unknown_folder`, so cache invalidation always hits the right key.
+- **Area**: `input` or `output`, ComfyUI's `folder_paths.get_input_directory()` / `get_output_directory()`. They are siblings of `models/`, **not** model folders and not folder keys: they have their own routes (§6.7), one root each, no `root_index`, and their own extension list (SR-4a). The directories are read from ComfyUI on every request, so `--input-directory` / `--output-directory` are honoured.
 - **Root**: one of the directories registered for a folder key (`folder_paths.get_folder_paths(key)`). A key can have several roots.
 - **Relative path**: a file's path under its root, `/`-separated, e.g. `sdxl/my_lora.safetensors`.
 
@@ -97,12 +102,28 @@ There is one upload protocol: **chunked, resumable, parallel**. A small file is 
 - **FR-UI6** When the server reports write operations disabled (§7), upload/delete controls are disabled with a tooltip and a notice explaining why.
 - **FR-UI7** Follows ComfyUI light/dark theme; usable on narrow screens.
 
+### 5.5 Input and output (API only)
+
+`input/` and `output/` are managed through their own routes, `/model_crud/input` and `/model_crud/output` (§6.7). They reuse the security-critical code of the model folders (the one path resolver, the chunked upload protocol and its sessions, the delete implementation) so that code is not duplicated. What differs:
+
+- **FR-M1** Each area supports list, chunked upload (create, chunk, status, list, complete, cancel) and delete, with the same semantics as §5.1-5.3 (recursive listing, relative paths, subfolders up to depth 4 created on upload, no silent overwrite, atomic publish, one file per delete) except that there is no `folder`, no `root_index` and no cache invalidation.
+- **FR-M2** Each area can be switched off with `MODEL_CRUD_MEDIA_FOLDERS` (§7). A switched-off area is `404 unknown_folder` on every one of its routes. `MODEL_CRUD_READ_ONLY`, `MODEL_CRUD_ALLOW_UPLOAD` and `MODEL_CRUD_ALLOW_DELETE` apply to the areas too; there is no separate write switch.
+- **FR-M3** Only the media extensions of SR-4a are listed, uploaded or deleted. Model files in these directories are neither listed nor deletable here, and media files are refused by the model routes: `415 extension_not_allowed` either way.
+- **FR-M4** The model routes do not know the areas: `/model_crud/models/output` and `{"folder": "output"}` on `POST /model_crud/uploads` are `unknown_folder`, and `/model_crud/folders` does not list them.
+- **FR-M5** Upload sessions belong to one kind of route. A session created under `/model_crud/input/uploads` is `404 unknown_upload` under `/model_crud/output/uploads` and under `/model_crud/uploads`, and the reverse, for status, chunk, complete and cancel, and it is absent from the other kinds' session lists. Sessions persist and resume across restarts exactly like model uploads (FR-U6a) and carry an `area` in the sidecar; a session whose area is switched off at startup is left on disk untouched and resumes when the area is enabled again.
+- **FR-M6** ComfyUI keeps no listing cache for these directories (`LoadImage` reads `input/` on every dropdown refresh), so nothing is invalidated after upload or delete. `LoadImage` lists only the top level of `input/`: a file uploaded into a subfolder is stored and listed but not offered by that node.
+- **FR-M7** A missing directory (ComfyUI creates `output/` lazily) lists as empty and is created by the first upload.
+- **FR-M8** Roots can nest: `output/checkpoints` is both a subtree of `output` and a secondary root of the `checkpoints` model key. The startup scan for unfinished uploads (FR-U6a) looks at each directory once, so a session in a nested directory is neither discarded nor resumed twice.
+- **FR-M9** Listing is not paginated by the server. Like model listings it reads no file contents (NFR-2 applies), but a very large `output/` makes a large response.
+
 ## 6. REST API
+
+The machine-readable contract is [openapi.yaml](openapi.yaml) (OpenAPI 3.1); `tests/test_openapi.py` checks that it lists exactly the registered routes and that every response seen in a scenario matches its documented status and schema. This section is the design rationale; when the two differ, fix the one that is wrong and keep both in step.
 
 Base: `/model_crud` (also reachable as `/api/model_crud`; clients use `api.fetchApi`). Requests and responses are JSON, except upload chunk bodies (raw bytes). Errors use one shape:
 
 ```json
-{ "error": "path_outside_root", "message": "Path escapes the model folder." }
+{ "error": "path_outside_root", "message": "Path escapes the folder." }
 ```
 
 ### 6.1 `GET /model_crud/config`
@@ -115,9 +136,12 @@ Returns what the server permits, so the UI can adapt.
   "max_upload_bytes": 107374182400,
   "chunk_size": 67108864,
   "max_parallel": 4,
-  "allowed_extensions": [".safetensors", ".ckpt", ".pt", ".pt2", ".pth", ".bin", ".pkl", ".sft", ".gguf", ".onnx"]
+  "allowed_extensions": [".safetensors", ".ckpt", ".pt", ".pt2", ".pth", ".bin", ".pkl", ".sft", ".gguf", ".onnx"],
+  "media_folders": ["input", "output"],
+  "media_extensions": [".png", ".jpg", ".jpeg", ".webp", ".gif", "…"]
 }
 ```
+`allowed_extensions` applies to model folders. `media_folders` lists the enabled areas (§5.5, empty if both are switched off) and `media_extensions` is their allowlist.
 
 ### 6.2 `GET /model_crud/folders`
 `roots` is the number of configured roots, so every `root_index` is below it. ComfyUI itself appends `output/<key>` roots for some keys (`checkpoints`, `loras`, `vae`, ...), and `extra_model_paths.yaml` adds more; uploads always go to the first.
@@ -215,6 +239,30 @@ The file is removed with `os.unlink` on the entry itself: for a symlink inside t
 ### 6.6 Status code summary
 `400` malformed input · `403` operation disabled by config, or refused by the filesystem (`permission_denied`) · `404` unknown folder / file / upload · `409` exists, upload in progress, incomplete · `413` too large · `415` extension not allowed · `422` checksum mismatch · `429` too many active uploads · `500` unexpected (generic message, traceback logged) · `507` disk full.
 
+### 6.7 Input and output (`/model_crud/{input|output}`)
+
+`{area}` is `input` or `output` and nothing else. The request and response shapes are those of §6.3-6.5 with these changes: `area` replaces `folder` in every response; there is no `folder` request field and no `root_index`; list entries have no `root_index`; extension errors refer to SR-4a.
+
+| Method and path | Same as | Success |
+|-----------------|---------|---------|
+| `GET /model_crud/{area}` | 6.3 | `200 { "area": "output", "files": [ { "path", "name", "size", "modified" } ] }` |
+| `DELETE /model_crud/{area}?path=<relative path>` | 6.5 | `200 { "area": "output", "path": "a/b.png", "deleted": true }` |
+| `POST /model_crud/{area}/uploads` | 6.4.1 | `201`, body as 6.4.1 with `area` in place of `folder` |
+| `PUT /model_crud/{area}/uploads/{upload_id}/chunks/{index}` | 6.4.2 | `200` as 6.4.2 |
+| `GET /model_crud/{area}/uploads/{upload_id}` | 6.4.3 | `200` with `area` |
+| `GET /model_crud/{area}/uploads` | 6.4.4 | `200 { "uploads": [...] }`, only this area's sessions |
+| `POST /model_crud/{area}/uploads/{upload_id}/complete` | 6.4.5 | `201 { "area", "path", "size" }` |
+| `DELETE /model_crud/{area}/uploads/{upload_id}` | 6.4.6 | `200` as 6.4.6 |
+
+Errors are those of the model routes. Additionally `404 unknown_folder` when the area is switched off (FR-M2), and `404 unknown_upload` for a session that belongs to another kind of route (FR-M5). `GET` of a missing directory is `200` with an empty list. Example:
+
+```bash
+curl -s -X POST localhost:8188/model_crud/input/uploads -H 'content-type: application/json' \
+  -d '{"filename": "ref.png", "size": 1048576, "subfolder": "refs"}'
+```
+
+The reference upload client (`scripts/model_crud_upload.py`) does not support the areas yet.
+
 ## 7. Configuration
 
 Environment variables (read once at startup); no config file in v1.
@@ -229,7 +277,9 @@ Environment variables (read once at startup); no config file in v1.
 | `MODEL_CRUD_MAX_PARALLEL` | `4` | Max concurrent chunk requests per upload advertised to clients. |
 | `MODEL_CRUD_MAX_ACTIVE_UPLOADS` | `4` | Max simultaneous upload sessions (each reserves disk space). |
 | `MODEL_CRUD_UPLOAD_TTL_HOURS` | `24` | Idle time after which an unfinished session and its temp files are removed. |
-| `MODEL_CRUD_EXTRA_EXTENSIONS` | empty | Comma-separated extra extensions to allow (e.g. `.yaml`), added to the defaults in SR-4. |
+| `MODEL_CRUD_EXTRA_EXTENSIONS` | empty | Comma-separated extra extensions to allow in **model** folders (e.g. `.yaml`), added to the defaults in SR-4. |
+| `MODEL_CRUD_MEDIA_FOLDERS` | `input,output` | Which areas (§5.5) are managed: `input`, `output`, both separated by a comma, or `none`. A switched-off area is `unknown_folder` on all its routes. An invalid value is logged and the default is used. |
+| `MODEL_CRUD_EXTRA_MEDIA_EXTENSIONS` | empty | Comma-separated extra extensions to allow in `input` and `output`, added to the defaults in SR-4a. `.part` is refused. |
 
 ## 8. Security requirements
 
@@ -242,6 +292,7 @@ ComfyUI has no authentication and is commonly exposed with `--listen`. This exte
 
 ### 8.2 File types
 - **SR-4** Allowed extensions: `.safetensors .ckpt .pt .pt2 .pth .bin .pkl .sft .gguf .onnx` plus `MODEL_CRUD_EXTRA_EXTENSIONS`. Checked case-insensitively on upload and delete.
+- **SR-4a** Allowed extensions in `input` and `output`: images `.png .jpg .jpeg .webp .gif .bmp .tif .tiff .avif .exr`, video `.mp4 .webm .mov .mkv .avi`, audio `.wav .mp3 .flac .ogg .opus .m4a .aac`, 3D `.glb .gltf .obj .ply .stl`, data `.latent .txt .json .csv`, plus `MODEL_CRUD_EXTRA_MEDIA_EXTENSIONS`. Deliberately excluded: model files (so these routes cannot be used around SR-4, and model files under `output/` are not deletable through them), `.svg` `.html` `.js` (active content that could execute in the ComfyUI origin if served inline) and anything executable. The list is chosen by the route (`Config.extensions_for_area`), never by the client; it is disjoint from the model list by default.
 - **SR-5** Filenames: basename only, control characters stripped, must be non-empty, must not start with `.`, ≤ 255 bytes.
 
 ### 8.3 Write safety
@@ -272,11 +323,13 @@ ComfyUI has no authentication and is commonly exposed with `--listen`. This exte
 __init__.py          registers routes, sets WEB_DIRECTORY
 api/routes.py        aiohttp handlers: parse → call service → map exceptions to responses
 services/paths.py    folder-key + relative-path resolution and validation (SR-1..5)
-services/comfy.py    the only module that touches ComfyUI's `folder_paths` (tests replace it)
+services/comfy.py    the only module that touches ComfyUI's `folder_paths` (tests replace it), including the input/output directories
+openapi.yaml         the API contract for clients (§6); checked against the code by tests/test_openapi.py
+services/media.py    list / delete for the input and output areas (shares `paths.py` and `models.walk` / `models.unlink_file`)
 services/models.py   list / delete using paths.py
 services/uploads.py  sessions, chunk writes, sidecar state, completion, expiry cleanup
 services/fsutil.py   preallocate, fsync + fadvise, no-replace publish (`os.link` + `os.unlink`); POSIX only
-services/config.py   env-var parsing (§7)
+services/config.py   env-var parsing (§7); the extension lists, `extensions_for_area` (SR-4, SR-4a)
 services/errors.py   typed exceptions carrying (status, code, message)
 web/model_crud.js    extension registration, sidebar tab (the only file that touches the frontend)
 web/api.js           REST client, takes ComfyUI's `api` object (no import-time side effects)
@@ -308,6 +361,7 @@ Unit/integration tests (pytest + `aiohttp.test_utils`, no ComfyUI required):
 - Multi-root folder keys; duplicate relative path in two roots; `root_index` delete.
 - Disabled operations return `403`; `/config` reflects them.
 - Unicode and space-containing filenames.
+- Input and output (`tests/test_media.py`): list/upload/delete/resume per area on both URL prefixes; the extension list rules (models and scripts invisible and undeletable, images refused by model routes); the model routes not knowing the areas; upload sessions not crossing between kinds of route; a switched-off area is `unknown_folder` on every route; traversal and symlink escape; `READ_ONLY`; directories read from ComfyUI on every call; a missing output directory; tampered sidecars with an area; nested roots (`output/checkpoints`) not losing a resumable session; a switched-off area's session skipped, not discarded.
 
 Manual acceptance (in a real ComfyUI):
 1. Extension loads with no console errors; sidebar tab appears.
@@ -316,6 +370,7 @@ Manual acceptance (in a real ComfyUI):
 3a. Upload a ~50 GB file: progress, speed and ETA update; disable the network mid-transfer, re-enable, and it continues without restarting; reload the page and resume; restart ComfyUI mid-transfer and resume; the final file's hash matches the source.
 4. Delete it; it disappears from list and dropdown.
 5. With `MODEL_CRUD_READ_ONLY=1`, controls are disabled and direct API calls return `403`.
+6. Upload a PNG with `POST /model_crud/input/uploads` (curl, §6.7); it is listed by `GET /model_crud/input` and appears in a `LoadImage` node's dropdown after refresh; delete it with `DELETE /model_crud/input?path=…` and it disappears. A `.safetensors` is refused by `/model_crud/output/uploads`; a `.png` is refused by `/model_crud/uploads` for `loras`. With `MODEL_CRUD_MEDIA_FOLDERS=output`, every `/model_crud/input…` route returns `404`.
 
 ## 12. Milestones
 
@@ -325,8 +380,12 @@ Manual acceptance (in a real ComfyUI):
 4. **M4 – Upload resilience**: sidecar persistence and resume, per-chunk and whole-file hashes, expiry cleanup, session limits, tests.
 5. **M5 – UI**: sidebar tab with list, delete with confirm, chunked uploader (parallelism, retry, pause/resume, progress/ETA, resume after reload).
 6. **M6 – Release**: README with API docs and screenshots, `pyproject.toml` Comfy Registry metadata, CHANGELOG, v0.1.0.
+7. **M7 – Input and output API** (§5.5, §6.7): `/model_crud/input` and `/model_crud/output` with list, chunked upload and delete, media allowlist, `MODEL_CRUD_MEDIA_FOLDERS`. Added after M5; a UI for it is not scheduled.
 
 ## 13. Decisions
 
 1. **Writes are enabled by default.** The server does not auto-disable upload/delete when ComfyUI listens on a non-loopback address; it only logs a startup warning (SR-10). Remote and cloud users are a primary audience, and operators who expose ComfyUI opt out with `MODEL_CRUD_READ_ONLY=1`.
 2. **Uploads always go to the first root** of the folder key (FR-U1). There is no client-selectable root for uploads. `root_index` exists only to identify existing files in listings and deletes.
+3. **`input` and `output` are not model folders and have their own routes.** They are ComfyUI directories next to `models/`, so they are not folder keys, do not appear in `/folders` and are not reachable through `/models/{folder}` or `folder` in an upload request (FR-M4). Underneath they share the resolver, the upload protocol, the session manager and the delete code, so the security-critical logic exists once; sessions are scoped to the kind of route that created them (FR-M5).
+4. **The areas are on by default**, like writes (decision 1). Operators who want the previous exposure set `MODEL_CRUD_MEDIA_FOLDERS=none`; those who only want to prune generated images set `output`. There is no separate write switch for them.
+5. **The media allowlist is closed, not "any file".** Arbitrary files in `input/` and `output/` would make the extension a general file manager for those directories. SR-4a lists what ComfyUI nodes read and write; `MODEL_CRUD_EXTRA_MEDIA_EXTENSIONS` covers the rest.

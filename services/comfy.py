@@ -17,6 +17,13 @@ def _folder_paths() -> ModuleType:
     return folder_paths
 
 
+def media_directory(area: str) -> str:
+    """ComfyUI's ``input`` or ``output`` directory. Read on every call: ``--input-directory`` and
+    ``--output-directory`` are applied through ``set_*_directory`` and can change."""
+    fp = _folder_paths()
+    return fp.get_input_directory() if area == "input" else fp.get_output_directory()
+
+
 def folder_keys() -> list[str]:
     return list(_folder_paths().folder_names_and_paths)
 

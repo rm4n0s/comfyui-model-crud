@@ -36,12 +36,13 @@ def list_folders(allowed: Collection[str]) -> list[dict[str, Any]]:
 def list_models(folder_key: object, allowed: Collection[str]) -> list[dict[str, Any]]:
     """Every allowed model file under every root of ``folder_key``, recursively (FR-L2..L6)."""
     allowed = frozenset(allowed)
-    files = [f for root in paths.get_roots(folder_key, allowed) for f in _walk(root, allowed)]
+    files = [f for root in paths.get_roots(folder_key, allowed) for f in walk(root, allowed)]
     files.sort(key=lambda f: (f["path"], f["root_index"]))
     return files
 
 
-def _walk(root: paths.Root, allowed: frozenset[str]) -> Iterator[dict[str, Any]]:
+def walk(root: paths.Root, allowed: frozenset[str]) -> Iterator[dict[str, Any]]:
+    """Allowed files below one root; shared with the input/output listing (media.py)."""
     # Directory symlinks are not followed: that avoids loops and duplicates, and a link that
     # leaves the root could not be operated on anyway (FR-L6, SR-2).
     stack = [("", root.path)]
@@ -99,6 +100,14 @@ def delete_model(
     if not config.delete_enabled:
         raise DeleteDisabled()
     resolved = paths.resolve_existing(folder_key, relpath, config.allowed_extensions, root_index)
+    size = unlink_file(resolved)
+    comfy.invalidate_cache(resolved.folder)
+    log.info("Deleted model: folder=%s path=%s size=%d", resolved.folder, resolved.relpath, size)
+    return {"folder": resolved.folder, "path": resolved.relpath, "deleted": True}
+
+
+def unlink_file(resolved: paths.ResolvedPath) -> int:
+    """Remove one resolved file and return its size. Shared with media.py."""
     try:
         size = os.stat(resolved.real).st_size
         # unlink the entry, not the realpath: for a symlink inside the root this removes the link
@@ -108,6 +117,4 @@ def delete_model(
         raise ModelFileNotFound() from None
     except PermissionError:
         raise PermissionDenied() from None
-    comfy.invalidate_cache(resolved.folder)
-    log.info("Deleted model: folder=%s path=%s size=%d", resolved.folder, resolved.relpath, size)
-    return {"folder": resolved.folder, "path": resolved.relpath, "deleted": True}
+    return size
