@@ -22,7 +22,7 @@ function el(tag, className, text) {
 
 const COLUMNS = { name: "Name", size: "Size", modified: "Modified" };
 
-export function createView(controller) {
+export function createView(controller, uploadView = null) {
   const { store } = controller;
 
   const root = el("div", "model-crud-panel");
@@ -74,7 +74,9 @@ export function createView(controller) {
   more.type = "button";
   more.addEventListener("click", () => controller.showMore());
 
-  root.append(toolbar, summary, notice, wrap, more);
+  root.append(toolbar);
+  if (uploadView) root.append(uploadView.element);
+  root.append(summary, notice, wrap, more);
 
   function renderRow(file, dupes, state) {
     const { dir, name } = splitPath(file.path);
@@ -175,13 +177,17 @@ export function createView(controller) {
     wrap.hidden = state.files.length === 0;
   }
 
-  const unsubscribe = store.subscribe(render);
+  const unsubscribe = store.subscribe((state) => {
+    render(state);
+    uploadView?.refresh(); // the upload target is the selected folder
+  });
   render(store.get());
 
   return {
     element: root,
     destroy() {
       unsubscribe();
+      uploadView?.destroy();
       controller.destroy();
     },
   };

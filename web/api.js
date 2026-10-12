@@ -11,6 +11,8 @@ export class ApiError extends Error {
   }
 }
 
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
 export function createClient(api) {
   async function request(path, init) {
     let response;
@@ -48,5 +50,34 @@ export function createClient(api) {
           `?path=${encodeURIComponent(path)}&root_index=${encodeURIComponent(rootIndex)}`,
         { method: "DELETE" },
       ),
+
+    // Uploads (SPEC §6.4). Chunk bodies are sent with XMLHttpRequest by the uploader, because
+    // fetch cannot report upload progress, so it only needs the URL and headers from here.
+    listUploads: async () => (await request("/model_crud/uploads")).uploads,
+    getUpload: (id) => request(`/model_crud/uploads/${encodeURIComponent(id)}`),
+    createUpload: (body) =>
+      request("/model_crud/uploads", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify(body),
+      }),
+    // Finishing can take a while on a slow disk, longer than fetchApi's default 60 s timeout.
+    completeUpload: (id) =>
+      request(`/model_crud/uploads/${encodeURIComponent(id)}/complete`, {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: "{}",
+        timeoutMs: null,
+      }),
+    cancelUpload: (id) =>
+      request(`/model_crud/uploads/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    chunkTarget(id, index) {
+      const headers = {};
+      if (api.user) headers["Comfy-User"] = api.user; // what fetchApi adds for multi-user setups
+      return {
+        url: api.apiURL(`/model_crud/uploads/${encodeURIComponent(id)}/chunks/${index}`),
+        headers,
+      };
+    },
   };
 }

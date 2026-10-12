@@ -49,3 +49,10 @@ test("no build step: the entry point only uses relative ES module imports and th
     }
   }
 });
+
+test("the scheduler and the queue manager never touch browser globals", () => {
+  for (const file of ["uploader.js", "upload_manager.js", "controller.js", "state.js", "api.js"]) {
+    const source = readFileSync(new URL(file, webDir), "utf8");
+    assert.ok(!/\b(document|window|navigator|localStorage|XMLHttpRequest|fetch)\b/.test(source.replace(/\/\/.*$/gm, "")), file);
+  }
+});

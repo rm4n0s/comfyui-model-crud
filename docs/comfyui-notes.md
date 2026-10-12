@@ -109,3 +109,13 @@ gitignored location such as `.bench/` or `.slow-test-tmp/`. Check with `stat -f`
 - `app.refreshComboInNodes()` re-reads node definitions, which is what refreshes loader-node dropdowns; after a UI delete the file was gone from a `LoraLoader` node's combo values. The frontend shows its own "Node definitions updated" toast when that runs.
 - The frontend lists and loads every `.js` under `web/` (`/extensions` showed `api.js`, `state.js`, `controller.js`, `view.js` too). They are inert on import, enforced by `tests/js/modules.test.mjs`.
 - `container-type: inline-size` with `@container` works in the sidebar, so the date column hides when the panel is narrow (the sidebar is about 300 px by default).
+
+## Uploading from the browser (Step 9, Firefox 157, frontend 1.55.14)
+
+- `XMLHttpRequest.send(blob)` with a `Blob.slice()` streams from disk: uploading a 300 MiB file raised the browser's total memory by about 4 MB (peak) while three 8 MiB chunks were in flight. `xhr.upload.onprogress` gives byte-level progress. `fetch` cannot report upload progress, which is why chunks use XHR.
+- `xhr.abort()` on a request that was opened but not yet sent fires no `abort` event, so a scheduler must not wait for one. (Real sends are synchronous after `open`; only the test fault injection delays them, and it emulates the event.)
+- `api.user` is the `Comfy-User` value `fetchApi` adds for multi-user setups; XHR requests must add it themselves. `api.apiURL(path)` builds the URL with the `/api` prefix.
+- `navigator.onLine` plus the window `online`/`offline` events are enough to pause and continue on a network drop; they can be driven from a test by redefining `navigator.onLine` and dispatching the event.
+- Dropping files: ComfyUI listens for `drop` on the document to open workflows; our handler calls `stopPropagation()` on drops that carry files, and a test confirms the event does not reach `document`. `new DataTransfer()` plus `items.add(new File(...))` works in Firefox for synthetic drops.
+- `crypto.subtle` exists only in secure contexts (HTTPS or localhost), so per-chunk SHA-256 is unavailable on a plain-HTTP LAN address; the uploader fails with a clear message rather than sending unverified chunks.
+- With a transfer running, reloading the page makes Firefox ask whether to leave (`beforeunload`); the harness handles it. After the reload `GET /uploads` lists the session and the UI resumes it by fingerprint.

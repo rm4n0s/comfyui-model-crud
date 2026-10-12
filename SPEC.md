@@ -91,6 +91,7 @@ There is one upload protocol: **chunked, resumable, parallel**. A small file is 
   - Optionally sends a per-chunk SHA-256 (WebCrypto), toggled in settings.
   - Unfinished server sessions are listed after a reload; resuming requires re-selecting a file whose `client_fingerprint` (name + size + lastModified) matches.
   - The server's error `message` is shown on failure. Requests a screen wake lock while uploading (best effort).
+- **FR-UI3a** Upload details. Files are validated in the browser first (empty, extension not in `/config`'s `allowed_extensions`, larger than `max_upload_bytes`) and refused with a message before any request. **Pause** aborts the chunk requests in flight (the server never records a partial chunk) and sends nothing until **Resume**; only chunks that were in flight are sent again. While the browser reports it is offline, the upload waits for the `online` event without using up retries. A stalled request (no byte for 60 s) is aborted and retried. A queue holds the next files while one is running or paused. `409 file_exists` offers "Retry with overwrite"; a failed upload with a server session can be retried (only missing chunks are sent) or cancelled (the partial upload is deleted on the server). Settings: `ModelCrud.Upload.Parallel` (1-8, default 3, capped by the server) and `ModelCrud.Upload.ChunkHash` (default off; needs a secure context because WebCrypto is only available on HTTPS or localhost). Closing or reloading the page while a transfer runs shows the browser's leave-page warning. Dropping files on the panel does not reach ComfyUI's own drop handlers.
 - **FR-UI4** Delete with a confirmation dialog naming the file and folder (ComfyUI's own `dialog.confirm`, which renders the message as text). Failures show the server's `message` in a toast and the list is refreshed either way.
 - **FR-UI5** Refresh button; list auto-refreshes after upload/delete.
 - **FR-UI6** When the server reports write operations disabled (§7), upload/delete controls are disabled with a tooltip and a notice explaining why.
@@ -282,6 +283,10 @@ web/api.js           REST client, takes ComfyUI's `api` object (no import-time s
 web/state.js         formatting, sorting, filtering, observable store (pure)
 web/controller.js    list/refresh/delete logic with injected client, dialog, toast, storage
 web/view.js          DOM construction (textContent only), web/model_crud.css the styles
+web/uploader.js      chunk scheduler for one file (Blob.slice, XHR, retries, pause/resume, resume from ranges)
+web/upload_manager.js  upload queue and unfinished-session logic (no DOM)
+web/upload_view.js   upload UI: picker, drag and drop, queue rows, unfinished uploads
+web/env.js           the browser services the scheduler uses (XHR, timers, online/offline, wake lock, WebCrypto)
 web/uploader.js      chunk scheduler: slicing, parallelism, retry/backoff, pause/resume
 web/…                UI components, CSS (prefix `model-crud-`)
 tests/               pytest; stubs for folder_paths and server
