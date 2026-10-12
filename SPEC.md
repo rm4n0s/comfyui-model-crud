@@ -267,6 +267,7 @@ ComfyUI has no authentication and is commonly exposed with `--listen`. This exte
 __init__.py          registers routes, sets WEB_DIRECTORY
 api/routes.py        aiohttp handlers: parse → call service → map exceptions to responses
 services/paths.py    folder-key + relative-path resolution and validation (SR-1..5)
+services/comfy.py    the only module that touches ComfyUI's `folder_paths` (tests replace it)
 services/models.py   list / delete using paths.py
 services/uploads.py  sessions, chunk writes, sidecar state, completion, expiry cleanup
 services/fsutil.py   preallocate, fsync + fadvise, no-replace publish (`os.link` + `os.unlink`); POSIX only
