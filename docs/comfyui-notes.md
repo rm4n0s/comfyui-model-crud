@@ -100,3 +100,12 @@ In the sandbox this project was developed in, `df` is misleading. `stat -f -c %T
 directory except the project directory is `tmpfs` (RAM-backed, 16 GB), including `../ComfyUI-dev`. Anything that needs a real
 disk (large uploads, page-cache behaviour, fsync timing) must put its model folder inside the project directory, in a
 gitignored location such as `.bench/` or `.slow-test-tmp/`. Check with `stat -f` before trusting any I/O measurement.
+
+## Frontend extension API, checked in a real browser (Step 8, frontend 1.55.14, Firefox 157)
+
+- A tab registered with `app.extensionManager.registerSidebarTab({ id, icon: "pi pi-folder-open", title, tooltip, label, type: "custom", render(el), destroy() })` appears in the sidebar and `render` is called each time the tab opens. Plain strings work for `title`/`tooltip`/`label` (core tabs pass i18n keys). `getSidebarTabs()` lists it.
+- `app.extensionManager.dialog.confirm({ title, message, type: "delete" })` resolves truthy on confirm and renders `message` as **text**: a file named `<img src=x onerror=...>"'.safetensors` showed up literally and nothing was injected. `app.extensionManager.toast.add({ severity, summary, detail, life })` also renders text.
+- The theme switches with the setting `Comfy.ColorPalette` (`"dark"` / `"light"`); `--fg-color`, `--comfy-menu-bg`, `--comfy-input-bg`, `--border-color`, `--descrip-text` and `--error-text` are defined in both and the panel is readable in both.
+- `app.refreshComboInNodes()` re-reads node definitions, which is what refreshes loader-node dropdowns; after a UI delete the file was gone from a `LoraLoader` node's combo values. The frontend shows its own "Node definitions updated" toast when that runs.
+- The frontend lists and loads every `.js` under `web/` (`/extensions` showed `api.js`, `state.js`, `controller.js`, `view.js` too). They are inert on import, enforced by `tests/js/modules.test.mjs`.
+- `container-type: inline-size` with `@container` works in the sidebar, so the date column hides when the panel is narrow (the sidebar is about 300 px by default).

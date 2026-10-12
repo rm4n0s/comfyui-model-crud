@@ -16,7 +16,7 @@ __init__.py          # ComfyUI entry point: registers routes, exports WEB_DIRECT
 pyproject.toml       # Comfy Registry metadata ([tool.comfy]) + dev tooling config
 api/                 # aiohttp route handlers (thin: parse request, call service, shape response)
 services/            # Pure-ish logic: path resolution, validation, file ops. No aiohttp imports.
-web/                 # Frontend JS served by ComfyUI (WEB_DIRECTORY = "./web")
+web/                 # Frontend JS served by ComfyUI (WEB_DIRECTORY = "./web"); web/package.json makes Node treat it as ESM
 tests/               # pytest; runnable without a ComfyUI install (see Testing)
 scripts/              # dev.sh (local ComfyUI), later model_crud_upload.py (reference CLI client)
 docs/                 # comfyui-notes.md (verified ComfyUI internals), later benchmarks, security review
@@ -80,6 +80,7 @@ This extension writes and deletes files on the host. ComfyUI has no built-in aut
 
 - `pytest` for everything under `services/` and for handlers via `aiohttp.test_utils`. Tests must not require a running ComfyUI: stub `folder_paths` (and `server.PromptServer`) in `tests/conftest.py` using `tmp_path` as the model roots.
 - Required test cases for any change touching file operations: traversal attempts (`../`, absolute paths, encoded variants, symlink escape), disallowed extension, existing-file conflict, aborted upload leaves no partial file, delete of missing file, and filenames with unicode/spaces.
+- JS: `node --test tests/js/*.test.mjs` (Node's built-in runner, no dependencies). UI changes are also checked in a real browser with `scripts/ui_check/` (see its README); do not claim a UI works without that or an explicit note that it was not run.
 - Manual check before declaring a feature done: start ComfyUI with this extension in `custom_nodes/`, confirm it loads without errors in the console, exercise list/upload/delete from the UI, and confirm that a new file appears in a loader node's dropdown after refresh. If you couldn't run ComfyUI, say so instead of claiming it works.
 
 ## Packaging & release

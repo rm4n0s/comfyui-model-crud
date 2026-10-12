@@ -1,0 +1,211 @@
+/* Everything is scoped to .model-crud-panel and uses ComfyUI's theme variables, with fallbacks
+   so the panel is still readable if a variable is missing in a future frontend. */
+
+.model-crud-panel {
+  --mc-fg: var(--fg-color, var(--input-text, #ddd));
+  --mc-muted: var(--descrip-text, color-mix(in srgb, var(--mc-fg) 60%, transparent));
+  --mc-bg: var(--comfy-menu-bg, #202020);
+  --mc-input-bg: var(--comfy-input-bg, #2b2b2b);
+  --mc-border: var(--border-color, color-mix(in srgb, var(--mc-fg) 25%, transparent));
+  --mc-error: var(--error-text, #ff4444);
+  container-type: inline-size;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  height: 100%;
+  padding: 0.75rem;
+  color: var(--mc-fg);
+  font-size: 0.875rem;
+}
+
+.model-crud-panel *,
+.model-crud-panel *::before,
+.model-crud-panel *::after {
+  box-sizing: border-box;
+}
+
+.model-crud-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.model-crud-folder,
+.model-crud-filter {
+  min-width: 0;
+  padding: 0.375rem 0.5rem;
+  color: var(--mc-fg);
+  background: var(--mc-input-bg);
+  border: 1px solid var(--mc-border);
+  border-radius: 4px;
+}
+
+.model-crud-folder {
+  flex: 0 1 11rem;
+}
+
+.model-crud-filter {
+  flex: 1 1 8rem;
+}
+
+.model-crud-button {
+  padding: 0.375rem 0.75rem;
+  color: var(--mc-fg);
+  font: inherit;
+  background: var(--mc-input-bg);
+  border: 1px solid var(--mc-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.model-crud-button:hover:not(:disabled) {
+  border-color: var(--mc-fg);
+}
+
+.model-crud-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.model-crud-delete {
+  padding: 0.25rem 0.5rem;
+  color: var(--mc-error);
+  white-space: nowrap;
+}
+
+.model-crud-summary {
+  color: var(--mc-muted);
+  min-height: 1.25rem;
+}
+
+.model-crud-notice {
+  padding: 0.5rem;
+  color: var(--mc-muted);
+  border: 1px solid var(--mc-border);
+  border-radius: 4px;
+}
+
+.model-crud-notice-error {
+  color: var(--mc-error);
+  border-color: var(--mc-error);
+}
+
+.model-crud-notice[hidden],
+.model-crud-more[hidden],
+.model-crud-tablewrap[hidden] {
+  display: none;
+}
+
+.model-crud-tablewrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden; /* columns are sized to fit; a stray scrollbar track looks wrong in dark themes */
+  overflow-y: auto;
+  scrollbar-color: var(--mc-border) transparent;
+  border: 1px solid var(--mc-border);
+  border-radius: 4px;
+}
+
+.model-crud-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.model-crud-table th,
+.model-crud-table td {
+  padding: 0.375rem 0.5rem;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--mc-border);
+}
+
+.model-crud-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--mc-bg);
+}
+
+.model-crud-sort {
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+th[aria-sort="ascending"] .model-crud-sort::after {
+  content: " ▲";
+}
+
+th[aria-sort="descending"] .model-crud-sort::after {
+  content: " ▼";
+}
+
+.model-crud-col-size,
+.model-crud-cell-size {
+  width: 4.75rem;
+  white-space: nowrap;
+}
+
+.model-crud-col-modified,
+.model-crud-cell-modified {
+  width: 10.5rem;
+  color: var(--mc-muted);
+}
+
+.model-crud-col-actions,
+.model-crud-cell-actions {
+  width: 5rem;
+  padding-left: 0;
+  text-align: right;
+}
+
+.model-crud-cell-name {
+  overflow-wrap: anywhere;
+}
+
+.model-crud-name {
+  display: block;
+}
+
+.model-crud-dir {
+  display: block;
+  color: var(--mc-muted);
+  font-size: 0.75rem;
+}
+
+.model-crud-badge {
+  display: inline-block;
+  margin-top: 0.125rem;
+  padding: 0 0.375rem;
+  color: var(--mc-muted);
+  font-size: 0.75rem;
+  border: 1px solid var(--mc-border);
+  border-radius: 999px;
+}
+
+.model-crud-more {
+  align-self: center;
+}
+
+.model-crud-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Narrow sidebars: drop the date column and tighten the rest. */
+@container (max-width: 26rem) {
+  .model-crud-col-modified,
+  .model-crud-cell-modified {
+    display: none;
+  }
+
+}

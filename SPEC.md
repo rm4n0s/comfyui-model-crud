@@ -82,8 +82,8 @@ There is one upload protocol: **chunked, resumable, parallel**. A small file is 
 - **FR-D5** Empty parent subfolders are left in place.
 
 ### 5.4 UI
-- **FR-UI1** A sidebar tab "Models" in the ComfyUI frontend.
-- **FR-UI2** Folder picker; file table with name, size, modified; client-side sort and text filter.
+- **FR-UI1** A sidebar tab "Model files" in the ComfyUI frontend (the frontend already has a "Model Library" tab with a similar name, so ours is titled differently).
+- **FR-UI2** Folder picker; file table with name, size, modified; client-side sort (natural, case-insensitive name order) and text filter (all words must match). A path that exists in more than one root shows a `root N` badge. At most 300 rows are rendered at a time ("Show more"), so a folder with thousands of files stays responsive.
 - **FR-UI3** Upload via button and drag-and-drop. Multiple files are queued and sent one at a time; within a file, chunks go in parallel (default 3, capped by the server's `max_parallel`).
   - The file is read lazily with `Blob.slice`; the whole file is never loaded into memory.
   - Each chunk is sent with `XMLHttpRequest` for byte-level progress, with up to 5 retries and exponential backoff; only failed chunks are re-sent.
@@ -91,9 +91,9 @@ There is one upload protocol: **chunked, resumable, parallel**. A small file is 
   - Optionally sends a per-chunk SHA-256 (WebCrypto), toggled in settings.
   - Unfinished server sessions are listed after a reload; resuming requires re-selecting a file whose `client_fingerprint` (name + size + lastModified) matches.
   - The server's error `message` is shown on failure. Requests a screen wake lock while uploading (best effort).
-- **FR-UI4** Delete with a confirmation dialog naming the file and folder.
+- **FR-UI4** Delete with a confirmation dialog naming the file and folder (ComfyUI's own `dialog.confirm`, which renders the message as text). Failures show the server's `message` in a toast and the list is refreshed either way.
 - **FR-UI5** Refresh button; list auto-refreshes after upload/delete.
-- **FR-UI6** When the server reports write operations disabled (§7), upload/delete controls are hidden or disabled with an explanation.
+- **FR-UI6** When the server reports write operations disabled (§7), upload/delete controls are disabled with a tooltip and a notice explaining why.
 - **FR-UI7** Follows ComfyUI light/dark theme; usable on narrow screens.
 
 ## 6. REST API
@@ -277,7 +277,11 @@ services/uploads.py  sessions, chunk writes, sidecar state, completion, expiry c
 services/fsutil.py   preallocate, fsync + fadvise, no-replace publish (`os.link` + `os.unlink`); POSIX only
 services/config.py   env-var parsing (§7)
 services/errors.py   typed exceptions carrying (status, code, message)
-web/model_crud.js    extension registration, sidebar tab
+web/model_crud.js    extension registration, sidebar tab (the only file that touches the frontend)
+web/api.js           REST client, takes ComfyUI's `api` object (no import-time side effects)
+web/state.js         formatting, sorting, filtering, observable store (pure)
+web/controller.js    list/refresh/delete logic with injected client, dialog, toast, storage
+web/view.js          DOM construction (textContent only), web/model_crud.css the styles
 web/uploader.js      chunk scheduler: slicing, parallelism, retry/backoff, pause/resume
 web/…                UI components, CSS (prefix `model-crud-`)
 tests/               pytest; stubs for folder_paths and server
