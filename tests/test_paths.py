@@ -547,3 +547,37 @@ def test_nothing_accepted_ever_leaves_the_root_and_nothing_else_is_raised(
             assert ".." not in resolved.relpath.split("/"), raw
 
     assert accepted > 0  # the generator does produce valid input, so the loop is not vacuous
+
+
+# --- non-model folder keys ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "exts"),
+    [
+        ("custom_nodes", set()),
+        ("configs", [".yaml"]),
+        ("classifiers", {""}),
+        ("diffusers", ["folder"]),
+    ],
+)
+def test_non_model_keys_are_unknown_to_every_operation(folder_paths, tmp_path, key, exts):
+    root = tmp_path / key
+    touch(root / "x.safetensors")
+    folder_paths.folder_names_and_paths[key] = ([str(root)], exts)
+
+    with pytest.raises(UnknownFolder):
+        existing(key, "x.safetensors")
+    with pytest.raises(UnknownFolder):
+        target(key, "x.safetensors")
+    with pytest.raises(UnknownFolder):
+        paths.get_roots(key, ALLOWED)
+
+
+def test_a_non_model_key_becomes_manageable_when_its_extension_is_allowed(folder_paths, tmp_path):
+    folder_paths.folder_names_and_paths["configs"] = ([str(tmp_path / "cfg")], [".YAML"])
+    allowed = ALLOWED | {".yaml"}
+
+    resolved = paths.resolve_upload_target("configs", "c.yaml", None, allowed)
+
+    assert resolved.relpath == "c.yaml"

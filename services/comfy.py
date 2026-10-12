@@ -45,3 +45,28 @@ def invalidate_cache(folder_key: str) -> None:
     cache = getattr(_folder_paths(), "filename_list_cache", None)
     if cache is not None:
         cache.pop(folder_key, None)
+
+
+def listen_addresses() -> list[str] | None:
+    """Addresses ComfyUI was told to listen on, or None if that cannot be determined.
+
+    ``PromptServer.address`` is not set yet while custom nodes load (docs/comfyui-notes.md), so
+    the parsed command line is the only source available at import time.
+    """
+    try:
+        from comfy.cli_args import args
+    except Exception:
+        return None
+    listen = getattr(args, "listen", None)
+    if not isinstance(listen, str):
+        return None
+    return [a.strip() for a in listen.split(",") if a.strip()]
+
+
+def cors_enabled() -> bool:
+    """True if ``--enable-cors-header`` replaced ComfyUI's origin check."""
+    try:
+        from comfy.cli_args import args
+    except Exception:
+        return False
+    return bool(getattr(args, "enable_cors_header", None))

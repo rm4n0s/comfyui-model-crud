@@ -69,6 +69,6 @@ def test_services_never_import_aiohttp_or_comfyui_directly():
                 continue
             for name in names:
                 top = name.split(".")[0]
-                # folder_paths is imported lazily, and only inside services/comfy.py
-                allowed = source.name == "comfy.py" and top == "folder_paths"
+                # ComfyUI modules are imported lazily, and only inside services/comfy.py
+                allowed = source.name == "comfy.py" and top in {"folder_paths", "comfy"}
                 assert top not in forbidden or allowed, f"{source.name} imports {name}"

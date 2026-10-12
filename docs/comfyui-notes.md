@@ -66,3 +66,11 @@ Verified against ComfyUI source, not from memory. Re-check when raising the mini
 - `SPEC.md`: FR-L1 (folder key filtering), §4 (canonical keys only), SR-10 (read `comfy.cli_args.args.listen`; also warn on `--enable-cors-header`), 6.4.5 (timeout note).
 - `CLAUDE.md`: cache key note, frontend conventions (`timeoutMs`, every `.js` in `web/` is loaded, `api.apiURL` for XHR), listen-address source.
 - `tests/conftest.py`: removed the guessed `address` attribute from the fake `PromptServer`.
+
+## Observed while building the read-only API (Step 3, real server)
+
+- ComfyUI appends `output/<key>` roots for `checkpoints`, `clip`, `vae`, `diffusion_models` and `loras` (`main.py:156-161`), so those keys report 2-3 roots out of the box. Models live in the first root (`models/<key>`) unless `extra_model_paths.yaml` sets `is_default: true`.
+- A key such as `custom_nodes` exists in `folder_names_and_paths` with an empty extension set. Hiding it from `/folders` is not enough, the resolver itself refuses it (`paths.is_managed`).
+- ComfyUI refuses to start a second instance on the same database file ("Close the other ComfyUI ..."), so parallel test instances need `--database-url` or `--disable-assets`.
+- `extra_model_paths.yaml` entries are honoured (second `loras` root listed with `root_index: 1`).
+- `--listen 0.0.0.0` is visible through `comfy.cli_args.args.listen` at import time, and our SR-10 warning fires; `MODEL_CRUD_READ_ONLY=1` silences it.

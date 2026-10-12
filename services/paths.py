@@ -81,11 +81,21 @@ def is_inside(root: str, path: str) -> bool:
         return False
 
 
-def get_roots(folder_key: object) -> list[Root]:
-    paths = comfy.get_folder_paths(folder_key)
-    if not paths:
+def is_managed(folder_key: str, allowed: Collection[str]) -> bool:
+    """Whether ``folder_key`` holds files of a type we manage (FR-L1).
+
+    ComfyUI registers non-model keys too (``custom_nodes``, ``configs``, ...). Those must be
+    unknown to every endpoint, not just hidden from the folder list, or a client could write
+    into the directory ComfyUI executes code from.
+    """
+    return bool(comfy.folder_extensions(folder_key) & set(allowed))
+
+
+def get_roots(folder_key: object, allowed: Collection[str]) -> list[Root]:
+    configured = comfy.get_folder_paths(folder_key)
+    if not configured or not is_managed(str(folder_key), allowed):
         raise UnknownFolder()
-    return [Root(i, os.path.realpath(p)) for i, p in enumerate(paths)]
+    return [Root(i, os.path.realpath(p)) for i, p in enumerate(configured)]
 
 
 def sanitize_filename(raw: object) -> str:
@@ -118,7 +128,7 @@ def resolve_existing(
 
     Without ``root_index`` the first root containing the file wins.
     """
-    roots = get_roots(folder_key)
+    roots = get_roots(folder_key, allowed)
     segments = _parse_relative(relpath, folder_key)
     check_extension(segments[-1], allowed)
 
@@ -139,7 +149,7 @@ def resolve_upload_target(
 
     Touches nothing on disk: the subfolder may not exist yet, and the caller creates it.
     """
-    roots = get_roots(folder_key)
+    roots = get_roots(folder_key, allowed)
     name = sanitize_filename(filename)
     check_extension(name, allowed)
     segments = (
@@ -202,17 +212,23 @@ def _locate(
     )
 
 
-def _check_component(part: str, *, final: bool) -> None:
-    """One path segment: non-empty, no leading dot, no controls, valid UTF-8, <= 255 bytes."""
-    reject = InvalidFilename if final else BadRequest
+def is_valid_component(part: str) -> bool:
+    """One path segment: non-empty, no leading dot, no controls, valid UTF-8, <= 255 bytes.
+
+    Listing uses this too, so nothing is shown that the resolver would refuse to address.
+    """
     try:
         size = len(part.encode("utf-8"))
     except UnicodeEncodeError:  # lone surrogates would become arbitrary raw bytes on disk
-        raise reject() from None
+        return False
     if not part or part.startswith(".") or size > MAX_NAME_BYTES:
-        raise reject()
-    if any(_is_control(c) for c in part):
-        raise reject()
+        return False
+    return not any(_is_control(c) for c in part)
+
+
+def _check_component(part: str, *, final: bool) -> None:
+    if not is_valid_component(part):
+        raise (InvalidFilename if final else BadRequest)()
 
 
 def _is_control(char: str) -> bool:

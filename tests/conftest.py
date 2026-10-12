@@ -14,7 +14,8 @@ bare package object: it exposes the subpackages without running ``__init__.py``.
 import importlib.util
 import sys
 import types
-from collections.abc import Callable
+from argparse import Namespace
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -86,16 +87,56 @@ def load_package(
     folder_paths: FakeFolderPaths,
     prompt_server: FakePromptServer,
     monkeypatch: pytest.MonkeyPatch,
-) -> Callable[[str], types.ModuleType]:
+) -> Iterator[Callable[[str], types.ModuleType]]:
     """Execute the real ``__init__.py`` under a throwaway name, with the fakes in place."""
+    loaded: list[str] = []
+
+    def purge(name: str) -> None:
+        # Submodules stay in sys.modules after the package itself is restored, and a stale
+        # ``<name>.api.register`` would make the next load skip its import-time side effects.
+        for key in [k for k in sys.modules if k == name or k.startswith(name + ".")]:
+            del sys.modules[key]
 
     def load(name: str = "comfyui_model_crud_loaded") -> types.ModuleType:
+        purge(name)
+        loaded.append(name)
         spec = importlib.util.spec_from_file_location(
             name, ROOT / "__init__.py", submodule_search_locations=[str(ROOT)]
         )
         module = importlib.util.module_from_spec(spec)
-        monkeypatch.setitem(sys.modules, name, module)
+        sys.modules[name] = module
         spec.loader.exec_module(module)
         return module
 
-    return load
+    yield load
+    for name in loaded:
+        purge(name)
+
+
+@pytest.fixture
+def cli_args(monkeypatch: pytest.MonkeyPatch) -> Namespace:
+    """Fake ``comfy.cli_args.args`` (what ComfyUI parsed from its command line)."""
+    args = Namespace(listen="127.0.0.1", enable_cors_header=None)
+    cli_module = types.ModuleType("comfy.cli_args")
+    cli_module.args = args
+    comfy_module = types.ModuleType("comfy")
+    comfy_module.cli_args = cli_module
+    monkeypatch.setitem(sys.modules, "comfy", comfy_module)
+    monkeypatch.setitem(sys.modules, "comfy.cli_args", cli_module)
+    return args
+
+
+@pytest.fixture
+def comfy_app() -> Callable[[web.RouteTableDef], web.Application]:
+    """Build an app wired like ComfyUI's ``add_routes()``: each route at ``/x`` and ``/api/x``."""
+
+    def build(routes: web.RouteTableDef) -> web.Application:
+        app = web.Application()
+        api_routes = web.RouteTableDef()
+        for route in routes:
+            api_routes.route(route.method, "/api" + route.path)(route.handler, **route.kwargs)
+        app.add_routes(api_routes)
+        app.add_routes(routes)
+        return app
+
+    return build

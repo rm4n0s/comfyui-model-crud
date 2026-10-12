@@ -1,1 +1,1 @@
-"""aiohttp route handlers. Importing this package registers the routes (added in step 3)."""
+"""aiohttp route handlers. ``api.register`` is the module with import-time side effects."""

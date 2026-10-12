@@ -46,12 +46,12 @@ It runs inside the ComfyUI process (aiohttp server) and adds no workflow nodes.
 ## 5. Functional requirements
 
 ### 5.1 List
-- **FR-L1** List the folder keys that have at least one existing root and whose ComfyUI extension set shares at least one entry with the allowlist (§8.2). This excludes non-model keys such as `custom_nodes`, `datasets`, `configs` and `diffusers`.
+- **FR-L1** List the folder keys that have at least one existing root and whose ComfyUI extension set shares at least one entry with the allowlist (§8.2). This excludes non-model keys such as `custom_nodes`, `datasets`, `configs` and `diffusers`. A key that is not listed is `unknown_folder` on **every** endpoint (list, upload, delete), not just hidden from the folder list.
 - **FR-L2** List the model files under a folder key, across all its roots, recursively.
 - **FR-L3** Only files with an allowed extension (§8.2) are returned. Other files are ignored.
 - **FR-L4** Each entry has: relative `path`, `name`, `size` (bytes), `modified` (ISO-8601 UTC), and `root_index` (index of the root it lives in, so that duplicate relative paths in different roots are distinguishable).
 - **FR-L5** Listing must not hash or open file contents.
-- **FR-L6** Symlinks that resolve outside every root are skipped.
+- **FR-L6** Symlinks whose real location is outside the root they sit in are skipped (so everything listed can also be uploaded over or deleted, SR-2). Directory symlinks are not followed, which rules out loops and duplicates. Names starting with `.` (hidden files, upload temp files) and names the API could not address (control characters, > 255 bytes) are never listed.
 
 ### 5.2 Upload
 
@@ -118,6 +118,7 @@ Returns what the server permits, so the UI can adapt.
 ```
 
 ### 6.2 `GET /model_crud/folders`
+`roots` is the number of configured roots, so every `root_index` is below it. ComfyUI itself appends `output/<key>` roots for some keys (`checkpoints`, `loras`, `vae`, ...), and `extra_model_paths.yaml` adds more; uploads always go to the first.
 ```json
 { "folders": [ { "key": "loras", "roots": 2 }, { "key": "checkpoints", "roots": 1 } ] }
 ```
