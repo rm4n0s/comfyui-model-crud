@@ -93,3 +93,10 @@ Verified against ComfyUI source, not from memory. Re-check when raising the mini
 - Custom nodes are imported inside `nodes.init_extra_nodes()` (a coroutine on the server's own event loop), and `PromptServer.instance.app` already exists at that point, so `app.on_startup` / `app.on_cleanup` can be appended at import time. `on_startup` runs in `AppRunner.setup()` before the sockets open, which is where unfinished uploads are rediscovered, so no request can arrive before they are restored.
 - `kill -9` of the ComfyUI process during an upload leaves `.model_crud_<id>.part` and `.json` on disk. After a restart `GET /api/model_crud/uploads` listed the session with the same ranges, only the missing chunks were sent, and the final SHA-256 matched the source.
 - ComfyUI refuses to start a second instance while another one holds its SQLite assets database, so restart tests must wait for the old process to exit.
+
+## Dev environment: which filesystems are real (found in Step 7)
+
+In the sandbox this project was developed in, `df` is misleading. `stat -f -c %T <path>` shows that everything under the home
+directory except the project directory is `tmpfs` (RAM-backed, 16 GB), including `../ComfyUI-dev`. Anything that needs a real
+disk (large uploads, page-cache behaviour, fsync timing) must put its model folder inside the project directory, in a
+gitignored location such as `.bench/` or `.slow-test-tmp/`. Check with `stat -f` before trusting any I/O measurement.
