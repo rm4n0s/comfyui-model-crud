@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 from comfyui_model_crud.services import fsutil, models, uploads
-from comfyui_model_crud.services.config import Config
 from comfyui_model_crud.services.errors import (
     BadChunk,
     BadRequest,
@@ -25,34 +24,9 @@ from comfyui_model_crud.services.errors import (
     UploadsDisabled,
 )
 from comfyui_model_crud.services.uploads import UploadManager, missing_ranges, to_ranges
+from uploadkit import Body, make_config, payload
 
 CHUNK = 1024
-
-
-class Body:
-    """A fake request body: ``data`` in small blocks, optionally cut short or failing."""
-
-    def __init__(self, data: bytes, *, block: int = 300, fail_after: int | None = None):
-        self.data, self.block, self.fail_after = data, block, fail_after
-
-    async def iter_chunked(self, n: int):
-        sent = 0
-        for i in range(0, len(self.data), min(n, self.block)):
-            piece = self.data[i : i + min(n, self.block)]
-            if self.fail_after is not None and sent + len(piece) > self.fail_after:
-                yield piece[: self.fail_after - sent]
-                raise ConnectionResetError("client went away")
-            sent += len(piece)
-            yield piece
-            await asyncio.sleep(0)
-
-
-def make_config(**overrides) -> Config:
-    values = dict(
-        chunk_size=CHUNK, max_upload_bytes=10 * 1024**2, max_parallel=64, max_active_uploads=4
-    )
-    values.update(overrides)
-    return Config(**values)
 
 
 @pytest.fixture
@@ -79,10 +53,6 @@ def loras(folder_paths) -> Path:
     return Path(folder_paths.get_folder_paths("loras")[0])
 
 
-def payload(size: int, seed: int = 1) -> bytes:
-    return random.Random(seed).randbytes(size)
-
-
 async def send(manager, session, index: int, data: bytes, **kw):
     start = index * session.chunk_size
     piece = data[start : start + session.chunk_size]
@@ -94,7 +64,7 @@ async def create(manager, size: int, name: str = "m.safetensors", **kw):
 
 
 def part_files(directory: Path) -> list[Path]:
-    return sorted(directory.glob(".model_crud_*"))
+    return sorted(directory.glob(".model_crud_*.part"))
 
 
 # --- creation -------------------------------------------------------------------------------
@@ -495,6 +465,7 @@ async def test_chunk_writes_never_leak_file_descriptors(manager):
         await send(manager, session, i, data)
     with pytest.raises(BadChunk):
         await send(manager, session, 0, data, fail_after=10)
+    await send(manager, session, 0, data)  # a failed re-send un-records the chunk
     await manager.complete(session.id)
 
     assert len(os.listdir("/proc/self/fd")) <= before
@@ -657,10 +628,10 @@ async def test_chunks_during_finalisation_are_refused(manager, monkeypatch):
     loop = asyncio.get_running_loop()
     real = manager._publish
 
-    def slow_publish(s):
+    def slow_publish(*args):
         loop.call_soon_threadsafe(started.set)
         asyncio.run_coroutine_threadsafe(release.wait(), loop).result(5)
-        real(s)
+        real(*args)
 
     monkeypatch.setattr(manager, "_publish", slow_publish)
     completing = asyncio.create_task(manager.complete(session.id))
@@ -726,10 +697,12 @@ async def test_a_directory_swapped_for_a_symlink_before_completion_is_refused(
     outside.mkdir()
     session = await create(manager, 10, subfolder="sub")
     await send(manager, session, 0, payload(10))
-    (loras / "sub" / f".model_crud_{session.id}.part").rename(outside / "moved.part")
+    for suffix in ("part", "json"):  # the whole upload "moves" behind a symlinked folder
+        (loras / "sub" / f".model_crud_{session.id}.{suffix}").rename(
+            outside / f".model_crud_{session.id}.{suffix}"
+        )
     (loras / "sub").rmdir()
     (loras / "sub").symlink_to(outside, target_is_directory=True)
-    (outside / f".model_crud_{session.id}.part").write_bytes(payload(10))
 
     with pytest.raises(PathOutsideRoot):
         await manager.complete(session.id)
@@ -820,7 +793,10 @@ async def test_disabled_uploads_refuse_every_operation(make_manager, loras, over
     with pytest.raises(UploadsDisabled):
         await manager.cancel(session.id)
 
-    assert [p.name for p in loras.iterdir()] == [f".model_crud_{session.id}.part"]
+    assert sorted(p.name for p in loras.iterdir()) == [
+        f".model_crud_{session.id}.json",
+        f".model_crud_{session.id}.part",
+    ]
 
 
 async def test_delete_flag_does_not_disable_uploads(make_manager):

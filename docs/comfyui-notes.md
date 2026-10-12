@@ -87,3 +87,9 @@ Verified against ComfyUI source, not from memory. Re-check when raising the mini
 - When a client drops mid-body, aiohttp 3.14 cancels the handler task (`CancelledError` at the next read). The upload code therefore must release session state in `finally` blocks, which it does (writer count, per-index lock, file handle); tested with a real aborted request.
 - Recent aiohttp versions send the request headers together with the first body bytes, so a test client that stalls before yielding anything never reaches the server.
 - `os.posix_fallocate` is available and preallocation of the temp file is immediate on this machine's ext4; the sparse-file fallback is only covered by unit tests (no real filesystem here lacks fallocate).
+
+## Observed while building upload resilience (Step 6, real server)
+
+- Custom nodes are imported inside `nodes.init_extra_nodes()` (a coroutine on the server's own event loop), and `PromptServer.instance.app` already exists at that point, so `app.on_startup` / `app.on_cleanup` can be appended at import time. `on_startup` runs in `AppRunner.setup()` before the sockets open, which is where unfinished uploads are rediscovered, so no request can arrive before they are restored.
+- `kill -9` of the ComfyUI process during an upload leaves `.model_crud_<id>.part` and `.json` on disk. After a restart `GET /api/model_crud/uploads` listed the session with the same ranges, only the missing chunks were sent, and the final SHA-256 matched the source.
+- ComfyUI refuses to start a second instance while another one holds its SQLite assets database, so restart tests must wait for the old process to exit.

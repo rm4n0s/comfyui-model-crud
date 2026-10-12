@@ -121,6 +121,40 @@ def describe_session(session: uploads.UploadSession) -> dict[str, Any]:
     }
 
 
+def describe_status(session: uploads.UploadSession, *, ranges: bool) -> dict[str, Any]:
+    """The 6.4.3 / 6.4.4 shape; the list omits `received_ranges`, which can be long."""
+    body: dict[str, Any] = {
+        "upload_id": session.id,
+        "folder": session.folder,
+        "path": session.relpath,
+        "size": session.size,
+        "chunk_size": session.chunk_size,
+        "total_chunks": session.total_chunks,
+    }
+    if ranges:
+        body["received_ranges"] = uploads.to_ranges(session.received)
+    body.update(
+        received_bytes=session.received_bytes,
+        client_fingerprint=session.client_fingerprint,
+        expires_at=uploads.iso_utc(session.expires_at),
+    )
+    return body
+
+
+async def start_uploads(app: web.Application) -> None:
+    await uploads.get_manager().start()
+
+
+async def stop_uploads(app: web.Application) -> None:
+    await uploads.get_manager().stop()
+
+
+def register_lifecycle(app: web.Application) -> None:
+    """Resume persisted uploads before the server accepts requests; stop the sweep on exit."""
+    app.on_startup.append(start_uploads)
+    app.on_cleanup.append(stop_uploads)
+
+
 def describe_config(config: Config) -> dict[str, Any]:
     return {
         "version": VERSION,
@@ -187,10 +221,12 @@ def register_routes(routes: web.RouteTableDef) -> None:
         # Streamed from request.content: request.read()/post()/multipart() would buffer the
         # whole chunk and are capped by aiohttp's client_max_size (docs/comfyui-notes.md).
         index = chunk_index(request.match_info["index"])
-        if "Upload-Chunk-SHA256" in request.headers:  # until verified, never pretend it was
-            raise BadRequest("Per-chunk checksums are not supported yet.")
         result = await uploads.get_manager().write_chunk(
-            request.match_info["upload_id"], index, request.content, request.content_length
+            request.match_info["upload_id"],
+            index,
+            request.content,
+            request.content_length,
+            request.headers.get("Upload-Chunk-SHA256"),
         )
         return json_ok(result)
 
@@ -207,3 +243,15 @@ def register_routes(routes: web.RouteTableDef) -> None:
     @api_handler
     async def cancel_upload(request: web.Request) -> web.StreamResponse:
         return json_ok(await uploads.get_manager().cancel(request.match_info["upload_id"]))
+
+    @routes.get("/model_crud/uploads")
+    @api_handler
+    async def list_uploads(request: web.Request) -> web.StreamResponse:
+        found = uploads.get_manager().list_sessions()
+        return json_ok({"uploads": [describe_status(s, ranges=False) for s in found]})
+
+    @routes.get("/model_crud/uploads/{upload_id}")
+    @api_handler
+    async def get_upload(request: web.Request) -> web.StreamResponse:
+        session = uploads.get_manager().status(request.match_info["upload_id"])
+        return json_ok(describe_status(session, ranges=True))

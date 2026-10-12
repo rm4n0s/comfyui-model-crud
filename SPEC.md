@@ -63,6 +63,7 @@ There is one upload protocol: **chunked, resumable, parallel**. A small file is 
 - **FR-U4** **Parallel and out-of-order.** Chunks may be sent concurrently (up to `max_parallel`, advertised by the server) and in any order. A single TCP stream rarely saturates a fast or high-latency link; several do.
 - **FR-U5** **Idempotent chunks.** Re-sending a chunk rewrites the same byte range and is always safe. A chunk is recorded as received only after its full body was written, flushed (`fsync`) and, if a hash was supplied, verified.
 - **FR-U6** **Resumable.** Session state (target, size, chunk size, received chunk ranges, expiry) is persisted in a sidecar file next to the temp file, updated atomically after each chunk. The client can ask which chunks are missing after a dropped connection, a page reload, or a ComfyUI restart, and send only those.
+- **FR-U6a** **Persistence rules.** The sidecar `.model_crud_<id>.json` is rewritten atomically (temp file, `fsync`, rename) after every recorded chunk and is only ever *behind* the data, never ahead of it, so after a crash the worst case is re-sending a chunk. A chunk that is re-sent is un-recorded (and the sidecar updated) before its first byte is overwritten, so a corrupt or aborted re-send can never leave a damaged chunk marked as received. On startup nothing in a sidecar is trusted: the target is re-resolved with the normal path rules and must be exactly the directory the sidecar sits in; the temp file must be a regular file of the declared size; ranges, sizes and times are range-checked. Anything that fails is deleted together with its `.part` file. Stray `.model_crud_<id>.part` / `.json.tmp` files without a usable sidecar are removed only when older than one hour. Only the root and four levels of visible, non-symlinked subfolders are scanned.
 - **FR-U7** **Integrity.** Optional per-chunk SHA-256 (`Upload-Chunk-SHA256` header) is verified while receiving, so a corrupt chunk is rejected and re-sent without re-reading the whole file. Optional whole-file SHA-256 at completion is for scripts that already know the hash.
 - **FR-U8** **Fail early on space.** At creation the server requires free space ≥ declared size + 1 GiB margin and preallocates with `os.posix_fallocate`. On filesystems that don't support it (`EOPNOTSUPP`, e.g. some network filesystems) it falls back to a sparse `truncate`; the free-space check still applies, but a disk filled by something else mid-transfer surfaces as `507` on the affected chunk. Out-of-space is normally reported at creation, not at 90 % of the transfer.
 - **FR-U9** **Atomic publish.** The file appears at its final path only on completion, after all chunks are present, the file is `fsync`ed and (optionally) the whole-file hash matches. Publishing is a rename inside the same directory. With `overwrite=false` it must not replace an existing file (hard-link-then-unlink, or the platform's no-replace rename; `409 file_exists`).
@@ -171,7 +172,7 @@ Request (JSON):
 Errors: `400 bad_request`, `400 invalid_filename`, `400 path_outside_root`, `403 uploads_disabled`, `403 permission_denied`, `404 unknown_folder`, `409 file_exists` (also when a folder has that name), `409 upload_in_progress`, `413 too_large`, `415 extension_not_allowed`, `429 too_many_uploads`, `507 insufficient_storage`. JSON request bodies are limited to 64 KiB (`413 too_large`).
 
 #### 6.4.2 `PUT /model_crud/uploads/{upload_id}/chunks/{index}` — send one chunk
-Body: the raw bytes of chunk `index` (0-based). `Content-Length` is required and must equal `chunk_size` (or the remainder for the last chunk). Optional header `Upload-Chunk-SHA256: <hex>`.
+Body: the raw bytes of chunk `index` (0-based). `Content-Length` is required and must equal `chunk_size` (or the remainder for the last chunk). Optional header `Upload-Chunk-SHA256: <64 hex characters>`, verified while the body streams (hashing runs in the worker thread).
 
 `200`: `{ "index": 17, "received_chunks": 18, "received_bytes": 1207959552 }`
 Errors: `400 bad_chunk` (index out of range, wrong or missing `Content-Length`, body shorter or longer than declared, stalled for 120 s), `404 unknown_upload`, `409 upload_in_progress` (the session is being finalised), `422 checksum_mismatch` (chunk not recorded; re-send), `429 too_many_uploads` (more than `max_parallel` chunk requests in flight for this session; retry after a short backoff), `507 insufficient_storage`. Two requests for the same index are serialised, so the last complete body wins and blocks of different senders never mix.
@@ -188,10 +189,10 @@ Errors: `400 bad_chunk` (index out of range, wrong or missing `Content-Length`, 
   "expires_at": "2026-10-13T12:00:00Z"
 }
 ```
-`received_ranges` are inclusive chunk-index ranges; the client sends only the gaps. Errors: `404 unknown_upload`.
+`received_ranges` are inclusive chunk-index ranges; the client sends only the gaps. Errors: `403 uploads_disabled`, `404 unknown_upload`.
 
 #### 6.4.4 `GET /model_crud/uploads` — list active sessions
-`200`: `{ "uploads": [ <same fields as 6.4.3 without received_ranges> ] }`. Used by the UI to offer resumption.
+`200`: `{ "uploads": [ <same fields as 6.4.3 without received_ranges> ] }`, oldest first. Used by the UI to offer resumption. Errors: `403 uploads_disabled`.
 
 #### 6.4.5 `POST /model_crud/uploads/{upload_id}/complete` — publish
 Optional JSON body: `{ "sha256": "<hex of the whole file>" }`. If given, the server hashes the assembled file in a worker thread (a full read; roughly a minute for 50 GB on NVMe) and rejects on mismatch. This request can outlast `api.fetchApi`'s default 60 s timeout, so browser clients pass `timeoutMs: null`.

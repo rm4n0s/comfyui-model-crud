@@ -9,9 +9,17 @@ from server import PromptServer
 
 from ..services.config import get_config
 from ..services.exposure import warn_if_exposed
-from .routes import register_routes
+from .routes import register_lifecycle, register_routes
 
 register_routes(PromptServer.instance.routes)
+
+_app = getattr(PromptServer.instance, "app", None)
+if _app is not None:
+    register_lifecycle(_app)
+else:  # ComfyUI changed shape: uploads still work, they just will not survive a restart
+    logging.getLogger("comfyui-model-crud").warning(
+        "PromptServer.app not found; unfinished uploads will not be resumed after a restart."
+    )
 
 try:
     warn_if_exposed(get_config())

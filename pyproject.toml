@@ -31,8 +31,10 @@ select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The repo root is itself a package (ComfyUI imports it as one), so let pytest import test
-# modules by file path instead of walking up to the root __init__.py.
-addopts = "--import-mode=importlib"
+# importlib mode: the repo root is itself a package (ComfyUI imports it as one), so import test
+# modules by file path instead of walking up to the root __init__.py. The default run skips the
+# slow scale test; `pytest -m slow` runs only that.
+addopts = "--import-mode=importlib -m 'not slow'"
+pythonpath = ["tests"]
 asyncio_mode = "auto"
 markers = ["slow: opt-in scale tests (run with -m slow)"]

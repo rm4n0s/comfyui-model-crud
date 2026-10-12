@@ -304,30 +304,6 @@ async def test_completion_race_returns_409_and_keeps_the_other_file(client, lora
     assert (loras / "m.safetensors").read_bytes() == b"appeared meanwhile"
 
 
-async def test_chunk_checksum_header_is_not_silently_ignored(client):
-    session = await (await create(client, 10)).json()
-
-    resp = await client.put(
-        f"/model_crud/uploads/{session['upload_id']}/chunks/0",
-        data=payload(10),
-        headers={"Upload-Chunk-SHA256": "0" * 64},
-    )
-
-    assert resp.status == 400 and (await resp.json())["error"] == "bad_request"
-    assert not uploads.get_manager().sessions[session["upload_id"]].received
-
-
-async def test_whole_file_checksum_is_not_silently_ignored(client):
-    session = await (await create(client, 10)).json()
-    await put_chunk(client, session["upload_id"], 0, payload(10))
-
-    resp = await client.post(
-        f"/model_crud/uploads/{session['upload_id']}/complete", json={"sha256": "0" * 64}
-    )
-
-    assert resp.status == 400
-
-
 # --- chunk validation -----------------------------------------------------------------------
 
 
